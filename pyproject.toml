@@ -1,16 +1,24 @@
 [project]
 name = "agents"
 version = "0.1.0"
-description = "Add your description here"
+description = "Agents framework for building AI agents with tool usage and memory."
 readme = "README.md"
 authors = [
     { name = "Harry Xiong", email = "harryxiong24@gmail.com" }
 ]
-requires-python = ">=3.11"
-dependencies = []
+requires-python = ">=3.12"
+dependencies = [
+    "gradio>=6.0",
+    "openrouter>=1.0",
+    "pypdf>=6.0",
+    "python-dotenv>=1.0",
+]
 
 [project.scripts]
-agents = "agents:main"
+# One entry per runnable agent. Each points at its app.py rather than at the
+# package itself: the __init__.py files deliberately do not import the UI, so
+# that importing ChatAgent does not pull in gradio.
+digital-twin-agent = "agents.digital_twin_agent.app:main"
 
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
