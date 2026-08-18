@@ -1,4 +1,4 @@
-"""Styling constants for the digital twin Gradio app."""
+"""Styling constants for the resume digging app."""
 
 GOLD = "#ecad0a"
 BLUE = "#209dd7"

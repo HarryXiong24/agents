@@ -66,4 +66,8 @@ class Agent:
 
     def _send(self, messages):
         """Send one request to the model, telling it which tools exist."""
-        return self.client.chat.send(model=self.model, messages=messages, tools=TOOLS)
+        try:
+            return self.client.chat.send(model=self.model, messages=messages, tools=TOOLS)
+        except Exception as e:
+            print(f"Error sending request to model: {e}")
+            raise

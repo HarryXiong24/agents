@@ -13,7 +13,7 @@ def main():
     # the same format the model API uses, so agent.chat can be handed over as is.
     gr.ChatInterface(
         agent.chat,
-        title="Digital Twin",
-        description="Chat with my AI twin about my career, background and experience.",
+        title="Resume Digging Agent",
+        description="Chat with resume digging agent about career, background and experience.",
         examples=EXAMPLES,
     ).launch(css=CSS, js=JS, theme=gr.themes.Base(), inbrowser=True)

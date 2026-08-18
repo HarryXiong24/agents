@@ -7,6 +7,8 @@ A tool has two halves that must stay in sync:
 
 import json
 
+from openrouter.components import ChatToolCall
+
 from .config import EMAILS_PATH
 
 
@@ -20,6 +22,11 @@ def record_email(email):
         file.write(email.strip() + "\n")
     return "Email received"
 
+def show_email():
+    """Show the recorded email addresses."""
+    with EMAILS_PATH.open("r", encoding="utf-8") as file:
+        emails = file.read().strip()
+    return f"Recorded emails:\n{emails}"
 
 # What the model sees. The model reads these descriptions to decide when to
 # call the tool and what arguments to pass, so keep them clear.
@@ -42,16 +49,30 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "show_email_tool",
+            "description": "Use this tool to show the recorded email addresses",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
+    }
 ]
 
 # Maps the tool name in the schema above to the function that implements it.
 # Adding a second tool means adding one entry to TOOLS and one entry here.
 TOOL_HANDLERS = {
     "record_email_tool": record_email,
+    "show_email_tool": show_email
 }
 
 
-def run_tool_calls(tool_calls):
+def run_tool_calls(tool_calls: list[ChatToolCall]) -> list[dict]:
     """Run every tool the model asked for and return the result messages.
 
     Each result must carry the tool_call_id it answers, so the model can match
@@ -67,6 +88,6 @@ def run_tool_calls(tool_calls):
         else:
             # The model sends arguments as a JSON string, e.g. '{"email": "a@b.com"}'.
             arguments = json.loads(tool_call.function.arguments or "{}")
-            content = handler(**arguments)
+            content = handler(**arguments) # Call the tool function with the arguments the model sent.
         results.append({"role": "tool", "content": content, "tool_call_id": tool_call.id})
     return results

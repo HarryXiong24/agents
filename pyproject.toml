@@ -18,7 +18,7 @@ dependencies = [
 # One entry per runnable agent. Each points at its app.py rather than at the
 # package itself: the __init__.py files deliberately do not import the UI, so
 # that importing ChatAgent does not pull in gradio.
-digital-twin-agent = "agents.digital_twin_agent.app:main"
+resume-digging-agent = "agents.resume_digging_agent.__main__:main"
 
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
