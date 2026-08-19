@@ -5,9 +5,9 @@ as long as it answers "I want to call a tool", run the tools, add their
 results to the conversation, and send it again.
 """
 
-from openrouter import OpenRouter
+from openai import OpenAI
 
-from .config import API_KEY, MODEL
+from .config import API_KEY, API_KEY_ENV, BASE_URL, MODEL, REQUIRES_API_KEY
 from .context import build_system_prompt
 from .tools import TOOLS, run_tool_calls
 
@@ -18,13 +18,20 @@ MAX_TOOL_ROUNDS = 10
 class Agent:
     """A digital twin that answers questions and can call tools."""
 
-    def __init__(self, model=MODEL, api_key=API_KEY):
-        """Create the client and load the system prompt from the profile files."""
-        if not api_key:
+    def __init__(self, model=MODEL, api_key=API_KEY, base_url=BASE_URL):
+        """Create the client and load the system prompt from the profile files.
+
+        The defaults come from config, so switching provider is a .env edit.
+        Passing the arguments explicitly is for tests, or for running two
+        models side by side in a notebook.
+        """
+        if REQUIRES_API_KEY and not api_key:
             raise RuntimeError(
-                "OPEN_ROUTER_API_KEY is not set. Add it to your .env file first."
+                f"{API_KEY_ENV} is not set. Add it to your .env file first."
             )
-        self.client = OpenRouter(api_key=api_key)
+        # base_url is the whole trick: every provider in config.PROVIDERS
+        # speaks this same protocol, so only the address changes.
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
         self.system_prompt = build_system_prompt()
 
@@ -67,7 +74,9 @@ class Agent:
     def _send(self, messages):
         """Send one request to the model, telling it which tools exist."""
         try:
-            return self.client.chat.send(model=self.model, messages=messages, tools=TOOLS)
+            return self.client.chat.completions.create(
+                model=self.model, messages=messages, tools=TOOLS
+            )
         except Exception as e:
             print(f"Error sending request to model: {e}")
             raise

@@ -7,7 +7,7 @@ A tool has two halves that must stay in sync:
 
 import json
 
-from openrouter.components import ChatToolCall
+from openai.types.chat import ChatCompletionMessageToolCall
 
 from .config import EMAILS_PATH
 
@@ -72,7 +72,7 @@ TOOL_HANDLERS = {
 }
 
 
-def run_tool_calls(tool_calls: list[ChatToolCall]) -> list[dict]:
+def run_tool_calls(tool_calls: list[ChatCompletionMessageToolCall]) -> list[dict]:
     """Run every tool the model asked for and return the result messages.
 
     Each result must carry the tool_call_id it answers, so the model can match
