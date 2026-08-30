@@ -53,7 +53,7 @@ PROVIDERS = {
         "base_url": "http://localhost:11434/v1",
         "api_key_env": "",
         "model_env": "OLLAMA_MODEL",
-        "default_model": "gemma4:cloud",
+        "default_model": "gpt-oss:20b",
     },
     "openai": {
         "base_url": "https://api.openai.com/v1",
