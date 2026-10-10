@@ -108,6 +108,7 @@ class Agent:
         """
         messages = self._build_messages(message, history)
 
+        # The first request is the same as the others, but it is sent outside the loop so that the loop can be exited when the model does not ask for tools.
         response = self._send_blocking(messages)
 
         # This loop is the agent. Everything else is setup.

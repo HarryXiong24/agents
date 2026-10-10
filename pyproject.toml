@@ -10,16 +10,23 @@ requires-python = ">=3.12"
 dependencies = [
     "gradio>=6.0",
     "openai>=3.3.0",
+    "openai-agents>=0.23.1",
+    "pydantic>=2.12.5",
     "pypdf>=6.0",
     "python-dotenv>=1.0",
+    "requests>=2.34.2",
 ]
 
 [project.scripts]
 # One entry per runnable agent. Each points at its app.py rather than at the
 # package itself: the __init__.py files deliberately do not import the UI, so
 # that importing ChatAgent does not pull in gradio.
-resume-digging-agent = "agents.resume_digging_agent.__main__:main"
+resume-digging-agent = "agent_apps.resume_digging_agent.__main__:main"
+deep-research-agent = "agent_apps.deep_research_agent.__main__:main"
 
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "agent_apps"
