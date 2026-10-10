@@ -39,4 +39,5 @@ def main():
     ui.launch(css=CSS, js=JS, theme=gr.themes.Base())
 
 
-main()
+if __name__ == "__main__":
+    main()
