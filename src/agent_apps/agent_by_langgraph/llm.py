@@ -1,3 +1,4 @@
+from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
@@ -7,7 +8,8 @@ from agent_apps.agent_by_langgraph.tool import get_share_price
 from .config import API_KEY, BASE_URL, MODEL_NAME
 
 
-def main():
+def llm():
+    load_dotenv(override=True)
     model = ChatOpenAI(
         model=MODEL_NAME,
         base_url=BASE_URL,
