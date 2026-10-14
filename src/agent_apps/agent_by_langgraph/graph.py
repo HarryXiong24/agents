@@ -19,10 +19,15 @@ def init_graph_basic():
     print(result["messages"][-1].content)
 
     builder = StateGraph(State)
+
     builder.add_node("chatbot", chatbot_node)
+
     builder.add_edge(START, "chatbot")
     builder.add_edge("chatbot", END)
+
     graph = builder.compile()
+    diagram = graph.get_graph().draw_ascii()
+    print(diagram)
 
     result = graph.invoke(
         State(
@@ -52,6 +57,8 @@ def init_graph_with_tools():
     builder.add_edge("tools", "chatbot")
 
     graph = builder.compile()
+    diagram = graph.get_graph().draw_ascii()
+    print(diagram)
 
     result = graph.invoke(
         State(
@@ -84,6 +91,8 @@ def init_graph_with_second_node():
     builder.add_edge("translator", END)
 
     graph = builder.compile()
+    diagram = graph.get_graph().draw_ascii()
+    print(diagram)
 
     result = graph.invoke(
         State(
