@@ -4,7 +4,7 @@ from langchain_core.tools import tool
 
 
 @tool
-def search():
-    """Search for information online."""
-    search = GoogleSerperRun(api_wrapper=GoogleSerperAPIWrapper())
-    return search
+def search(query: str) -> str:
+    """Search online for information matching the query and return the results."""
+    search_tool = GoogleSerperRun(api_wrapper=GoogleSerperAPIWrapper())
+    return search_tool.invoke(query)

@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "gradio>=6.0",
+    "ipython>=9.17.1",
     "langchain-community>=0.4.2",
     "langchain-core>=1.6.9",
     "langchain-openai>=1.7.0",
