@@ -1,10 +1,10 @@
-from agent_apps.agent_by_langgraph.graph import initGraph
-from agent_apps.agent_by_langgraph.llm import llm
+from agent_apps.agent_by_langgraph.graph import init_graph_with_tools
 
 
 def main():
     # llm()
-    initGraph()
+    # init_graph_basic()
+    init_graph_with_tools()
 
 
 if __name__ == "__main__":
