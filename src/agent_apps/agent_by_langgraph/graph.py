@@ -2,11 +2,12 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from agent_apps.agent_by_langgraph.node.chatbot import chatbot_node
-from agent_apps.agent_by_langgraph.node.silly_node import silly_node
-from agent_apps.agent_by_langgraph.node.translator import translator_node
-from agent_apps.agent_by_langgraph.state.state import State
-from agent_apps.agent_by_langgraph.tool.search import search
+from agent_apps.agent_by_langgraph.nodes.chatbot import chatbot_node
+from agent_apps.agent_by_langgraph.nodes.silly_node import silly_node
+from agent_apps.agent_by_langgraph.nodes.translator import translator_node
+from agent_apps.agent_by_langgraph.states.state import State
+from agent_apps.agent_by_langgraph.tools.search import search
+from agent_apps.agent_by_langgraph.utils.print_graph import print_graph
 
 
 def init_graph_basic():
@@ -27,8 +28,7 @@ def init_graph_basic():
     builder.add_edge("chatbot", END)
 
     graph = builder.compile()
-    diagram = graph.get_graph().draw_ascii()
-    print(diagram)
+    print_graph(graph.get_graph())
 
     result = graph.invoke(
         State(
@@ -58,8 +58,7 @@ def init_graph_with_tools():
     builder.add_edge("tools", "chatbot")
 
     graph = builder.compile()
-    diagram = graph.get_graph().draw_ascii()
-    print(diagram)
+    print_graph(graph.get_graph())
 
     result = graph.invoke(
         State(
@@ -92,8 +91,7 @@ def init_graph_with_second_node():
     builder.add_edge("translator", END)
 
     graph = builder.compile()
-    diagram = graph.get_graph().draw_ascii()
-    print(diagram)
+    print_graph(graph.get_graph())
 
     result = graph.invoke(
         State(
@@ -128,8 +126,7 @@ def init_graph_with_memory():
     builder.add_edge("translator", END)
 
     graph = builder.compile(checkpointer=memory)
-    diagram = graph.get_graph().draw_ascii()
-    print(diagram)
+    print_graph(graph.get_graph())
 
     config = {"configurable": {"thread_id": "conversation-1"}}
     graph.invoke(

@@ -1,6 +1,6 @@
 import random
 
-from agent_apps.agent_by_langgraph.state.state import State
+from agent_apps.agent_by_langgraph.states.state import State
 
 
 def silly_node(state: State) -> dict:

@@ -1,7 +1,7 @@
 from langchain_openai import ChatOpenAI
 
 from agent_apps.agent_by_langgraph.config import API_KEY, BASE_URL, MODEL_NAME
-from agent_apps.agent_by_langgraph.state.state import State
+from agent_apps.agent_by_langgraph.states.state import State
 
 
 def translator_node(state: State) -> dict:

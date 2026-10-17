@@ -2,8 +2,8 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
-from agent_apps.agent_by_langgraph.model.company import Company
-from agent_apps.agent_by_langgraph.tool.get_share_price import get_share_price
+from agent_apps.agent_by_langgraph.models.company import Company
+from agent_apps.agent_by_langgraph.tools.get_share_price import get_share_price
 
 from .config import API_KEY, BASE_URL, MODEL_NAME
 
