@@ -6,6 +6,15 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 load_dotenv(PROJECT_ROOT / ".env", override=True)
 
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")
+
+# Local deep-agent defaults for short development runs.
+DEEP_AGENT_MODEL = os.getenv("DEEP_AGENT_MODEL", "gpt-oss:20b")
+DEEP_AGENT_NUM_CTX = int(os.getenv("DEEP_AGENT_NUM_CTX", "8192"))
+DEEP_AGENT_NUM_PREDICT = int(os.getenv("DEEP_AGENT_NUM_PREDICT", "1024"))
+DEEP_AGENT_RECURSION_LIMIT = int(os.getenv("DEEP_AGENT_RECURSION_LIMIT", "20"))
+DEEP_AGENT_REASONING = os.getenv("DEEP_AGENT_REASONING", "low")
+
 PROVIDERS = {
     "ollama": {
         "base_url": "http://localhost:11434/v1",
