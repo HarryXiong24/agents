@@ -1,0 +1,8 @@
+{
+  "workspace": {
+    "transport": "stdio",
+    "command": "${PYTHON}",
+    "args": ["${ROOT}/mcp_servers/workspace_server.py"],
+    "env": { "WORKSPACE_DIR": "${ROOT}/workspace" }
+  }
+}
