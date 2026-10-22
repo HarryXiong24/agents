@@ -1,4 +1,4 @@
-from agent_apps.agent_by_langgraph.deep_agent import deep_agent
+from agent_apps.agent_by_langgraph.multi_agent import multi_deep_agent
 
 
 def main():
@@ -8,7 +8,8 @@ def main():
     # init_graph_with_second_node()
     # init_graph_with_memory()
     # agent()
-    deep_agent()
+    # deep_agent()
+    multi_deep_agent()
 
 
 if __name__ == "__main__":

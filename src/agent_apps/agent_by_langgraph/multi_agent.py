@@ -33,6 +33,9 @@ def multi_deep_agent():
             You write comparison briefings for a company choosing electric vehicles for its sales fleet.
             For each vehicle, delegate the research to your vehicle-researcher sub-agent,
             then write a markdown comparison to a file, ending with a clear recommendation.
+
+            " Use at most two web searches, then write a briefing of at most 350 words."
+            " State evidence limitations instead of continuing to search."
         """,
         subagents=[research_subagent],
         backend=FilesystemBackend(root_dir=str(sandbox), virtual_mode=True),
