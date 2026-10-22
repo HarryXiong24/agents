@@ -9,4 +9,6 @@ def create_model() -> ChatGroq:
         model=AGENT_MODEL,
         api_key=GROQ_API_KEY,
         base_url=BASE_URL,
+        # The Groq SDK waits for Retry-After on 429 responses before retrying.
+        max_retries=3,
     )

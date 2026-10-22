@@ -1,4 +1,4 @@
-from agent_apps.agent_by_langgraph.multi_agent import multi_deep_agent
+from agent_apps.agent_by_langgraph.slide_agent import slide_agent
 
 
 def main():
@@ -9,7 +9,8 @@ def main():
     # init_graph_with_memory()
     # agent()
     # deep_agent()
-    multi_deep_agent()
+    # multi_deep_agent()
+    slide_agent()
 
 
 if __name__ == "__main__":

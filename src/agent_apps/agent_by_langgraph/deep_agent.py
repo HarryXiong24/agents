@@ -2,20 +2,15 @@ from pathlib import Path
 
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
-from langchain_community.tools import GoogleSerperRun
-from langchain_community.utilities import GoogleSerperAPIWrapper
 from langgraph.checkpoint.memory import MemorySaver
 
-from .config import SERPER_API_KEY
+from .tools.search import search
 from .utils.chat_model import create_model
 
 
 def deep_agent():
     sandbox = Path(__file__).resolve().parent / "sandbox"
     sandbox.mkdir(parents=True, exist_ok=True)
-    search = GoogleSerperRun(
-        api_wrapper=GoogleSerperAPIWrapper(serper_api_key=SERPER_API_KEY, k=3)
-    )
     model = create_model()
 
     researcher = create_deep_agent(
