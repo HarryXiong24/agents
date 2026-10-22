@@ -1,21 +1,14 @@
-from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
 
 from agent_apps.agent_by_langgraph.models.company import Company
 from agent_apps.agent_by_langgraph.tools.get_share_price import get_share_price
 
-from .config import API_KEY, BASE_URL, MODEL_NAME
+from .utils.chat_model import create_model
 
 
 def llm():
-    load_dotenv(override=True)
-    model = ChatOpenAI(
-        model=MODEL_NAME,
-        base_url=BASE_URL,
-        api_key=API_KEY,
-        use_responses_api=False,
-    )
+    model = create_model()
 
     # Invoke the LLM with a message and print the reply
     # message = "In 1 sentence, what does it mean for an AI Agent to be autonomous"
@@ -46,23 +39,23 @@ def llm():
     print(final.content)
 
     # Demonstrate the LLM's ability to handle structured output
-    model = model.with_structured_output(Company)
+    model = create_model().with_structured_output(Company, method="function_calling")
     company = model.invoke("Tell me about Amazon the technology company")
     print(company)
 
 
-def invoke(model: ChatOpenAI, message: str) -> str:
+def invoke(model: ChatGroq, message: str) -> str:
     reply = model.invoke(message)
     return reply.content
 
 
-def stream(model: ChatOpenAI, message: str):
+def stream(model: ChatGroq, message: str):
     print("Streaming reply:")
     for chunk in model.stream(message):
         print(chunk.content, end="", flush=True)
 
 
-def message_to_dict(model: ChatOpenAI) -> dict:
+def message_to_dict(model: ChatGroq) -> dict:
     messages = [
         SystemMessage("You are a terse assistant who answers in exactly five words."),
         HumanMessage("What is the capital of France?"),

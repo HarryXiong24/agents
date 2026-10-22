@@ -27,19 +27,21 @@ implementations as described in the documentation.
 
 ## Use both wrappers
 
-Run this example with the project's Python environment and local Ollama server.
+Run this example with the project's Python environment and a Groq API key in `.env`
+(`GROQ_API_KEY`).
 The weather tool returns demo data. The same registration works with a model
-instance, such as the `ChatOpenAI` instance in `llm.py`.
+instance, such as the `ChatGroq` instance in `llm.py`.
 
 ```python
 from langchain.agents import create_agent
+from agent_apps.agent_by_langgraph.utils.chat_model import create_model
 
 from agent_apps.agent_by_langgraph.middlewares.log_tool_calls import log_tool_calls
 from agent_apps.agent_by_langgraph.middlewares.time_model_calls import time_model_calls
 from agent_apps.agent_by_langgraph.tools.get_weather import get_weather
 
 agent = create_agent(
-    model="ollama:gpt-oss:20b",
+    model=create_model(),
     tools=[get_weather],
     system_prompt="Use get_weather to answer weather questions.",
     middleware=[time_model_calls, log_tool_calls],

@@ -1,4 +1,5 @@
 from langchain.agents import create_agent
+from langchain.agents.structured_output import ToolStrategy
 from langgraph.checkpoint.memory import MemorySaver
 
 from agent_apps.agent_by_langgraph.middlewares.log_agent_end import log_agent_end
@@ -14,16 +15,17 @@ from agent_apps.agent_by_langgraph.middlewares.time_model_calls import time_mode
 from agent_apps.agent_by_langgraph.models.city_report import CityReport
 from agent_apps.agent_by_langgraph.tools.get_population import get_population
 from agent_apps.agent_by_langgraph.tools.get_weather import get_weather
+from agent_apps.agent_by_langgraph.utils.chat_model import create_model
 from agent_apps.agent_by_langgraph.utils.print_graph import print_graph
 
 
 def agent():
     agent = create_agent(
-        model="ollama:gpt-oss:20b",
+        model=create_model(),
         tools=[get_weather, get_population],
         system_prompt="You are a travel assistant. Use your tools to answer questions about cities.",
         checkpointer=MemorySaver(),
-        response_format=CityReport,
+        response_format=ToolStrategy(CityReport),
         middleware=[
             log_agent_start,
             log_agent_end,

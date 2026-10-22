@@ -1,36 +1,22 @@
-import os
+from pathlib import Path
 
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
 from langchain_community.tools import GoogleSerperRun
 from langchain_community.utilities import GoogleSerperAPIWrapper
-from langchain_ollama import ChatOllama
+from langgraph.checkpoint.memory import MemorySaver
 
-from .config import (
-    DEEP_AGENT_MODEL,
-    DEEP_AGENT_NUM_CTX,
-    DEEP_AGENT_NUM_PREDICT,
-    DEEP_AGENT_REASONING,
-    SERPER_API_KEY,
-)
+from .config import SERPER_API_KEY
+from .utils.chat_model import create_model
 
 
 def deep_agent():
-    sandbox = os.path.abspath("sandbox")
-    os.makedirs(sandbox, exist_ok=True)
+    sandbox = Path(__file__).resolve().parent / "sandbox"
+    sandbox.mkdir(parents=True, exist_ok=True)
     search = GoogleSerperRun(
         api_wrapper=GoogleSerperAPIWrapper(serper_api_key=SERPER_API_KEY, k=3)
     )
-    model = ChatOllama(
-        model=DEEP_AGENT_MODEL,
-        base_url="http://localhost:11434",
-        num_ctx=DEEP_AGENT_NUM_CTX,
-        num_predict=DEEP_AGENT_NUM_PREDICT,
-        reasoning={"true": True, "false": False}.get(
-            DEEP_AGENT_REASONING.lower(), DEEP_AGENT_REASONING
-        ),
-        keep_alive="1m",
-    )
+    model = create_model()
 
     researcher = create_deep_agent(
         model=model,
@@ -42,9 +28,11 @@ def deep_agent():
             " Use at most two web searches, then write a briefing of at most 350 words."
             " State evidence limitations instead of continuing to search."
         ),
-        backend=FilesystemBackend(root_dir=sandbox, virtual_mode=True),
+        checkpointer=MemorySaver(),
+        backend=FilesystemBackend(root_dir=str(sandbox), virtual_mode=True),
     )
 
+    config = {"configurable": {"thread_id": "deep-agent"}}
     inputs = {
         "messages": [
             {
@@ -58,7 +46,7 @@ def deep_agent():
             }
         ]
     }
-    result = researcher.invoke(inputs)
+    result = researcher.invoke(inputs, config)
     print(result["messages"][-1].content)
     print_tools(result)
 
