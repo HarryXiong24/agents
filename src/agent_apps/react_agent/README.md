@@ -55,11 +55,11 @@ Configuration is environment-driven (see `.env.example`); the repository root `.
 loaded automatically, with exported environment variables taking precedence. For example:
 `AGENT_MODEL=openai/gpt-oss-20b AGENT_MAX_ITERATIONS=12 uv run react-agent`.
 
-Offline tests (no Groq API key or Ollama needed — a scripted fake model drives the real graph and the real MCP server):
+Offline tests (no Groq API key needed — a scripted fake model drives the real graph and the real MCP server):
 
 ```bash
-# 17 tests: ReAct, HITL approve/edit/reject, ask_human/resume, tool errors, step budget, loop guard,
-# compaction, cross-thread memory, reflection, Groq configuration and embeddings.
+# 16 tests: ReAct, HITL approve/edit/reject, ask_human/resume, tool errors, step budget, loop guard,
+# compaction, cross-thread memory, reflection, Groq configuration.
 uv run python -m pytest src/agent_apps/react_agent/tests -q
 ```
 
@@ -111,7 +111,7 @@ src/agent_apps/react_agent/
 │   ├── tools.py                # local tools incl. ask_human + memory tools
 │   ├── memory.py               # long-term memory (Store) helpers + recall
 │   ├── mcp_client.py           # MCP → LangChain tool adapter
-│   └── llm.py                  # ChatGroq + optional Ollama embeddings
+│   └── llm.py                  # ChatGroq model factory
 ├── tests/                      # offline tests with a scripted model
 ├── LEARNING.md                 # reading order, exercises, self-check questions
 ├── workspace/                  # the sandbox the agent's file tools operate on
@@ -280,7 +280,7 @@ Three layers, each solving a different problem:
 │ namespace ("memories", user_id) → {"content": "...", "created_at": ...}         │
 │ write: agent calls save_memory / delete_memory (explicit, model-decided)        │
 │ read : prepare_turn auto-recalls top-k for the new message → system prompt      │
-│        (keyword overlap by default; semantic search if OLLAMA_EMBED_MODEL is set) │
+│        (keyword overlap between the query and stored memories)                │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ┌─ Compaction (rolling summary) ─────────────────────────────────────────────────┐
 │ when ~tokens(messages) > AGENT_CONTEXT_BUDGET:                                  │
@@ -327,8 +327,6 @@ class AgentContext:                       # per-run, not persisted
 | `AGENT_MODEL` | `openai/gpt-oss-20b` | Groq model with tool calling |
 | `GROQ_BASE_URL` | `https://api.groq.com` | SDK host; do not append `/openai/v1` |
 | `GROQ_TEMPERATURE` | `0.2` | Chat model temperature |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Used only for optional embeddings |
-| `OLLAMA_EMBED_MODEL` | *(unset)* | e.g. `nomic-embed-text` → semantic memory recall |
 | `AGENT_MAX_ITERATIONS` | `8` | ReAct step budget per turn |
 | `AGENT_MAX_REFLECTIONS` | `1` | Critic revisions per turn |
 | `AGENT_REFLECTION` | `true` | Enable the critic loop |
@@ -345,6 +343,4 @@ class AgentContext:                       # per-run, not persisted
 
 - Models occasionally emit malformed tool calls; the error-as-observation and loop
   guard layers exist precisely for this. Choose a Groq model that supports tool calling.
-- If switching `OLLAMA_EMBED_MODEL` on or off, delete `data/store.sqlite` (the vector index
-  dimensions are fixed at creation).
 - `run_shell` executes real commands in `./workspace` — that's why it's behind approval.

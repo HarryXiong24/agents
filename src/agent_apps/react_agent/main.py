@@ -32,7 +32,7 @@ from langgraph.types import Command
 from agent_apps.react_agent.agent import memory
 from agent_apps.react_agent.agent.config import settings
 from agent_apps.react_agent.agent.graph import build_graph
-from agent_apps.react_agent.agent.llm import get_chat_model, get_embeddings
+from agent_apps.react_agent.agent.llm import get_chat_model
 from agent_apps.react_agent.agent.mcp_client import load_mcp_tools
 from agent_apps.react_agent.agent.state import AgentContext
 from agent_apps.react_agent.agent.tools import LOCAL_TOOLS
@@ -277,16 +277,12 @@ async def main() -> None:
         print(f"{DIM}  MCP '{server}': {', '.join(names)}{RESET}")
     tools = [*LOCAL_TOOLS, *mcp_tools]
 
-    # 📘 LEARN — Store index: with an embeddings model, the store embeds the "content"
-    # field of every value on write and supports `asearch(ns, query=...)` by similarity.
-    # Without it, the store is a plain key-value store and memory.py falls back to
-    # keyword matching.
-    embeddings = get_embeddings()
-    index = {"embed": embeddings, "dims": settings.embed_dims, "fields": ["content"]} if embeddings else None
+    # 📘 LEARN — Store: memories are persisted as key-value records, scoped by user.
+    # memory.py ranks recalled records by keyword overlap with the current query.
 
     async with (
         AsyncSqliteSaver.from_conn_string(str(settings.data_dir / "checkpoints.sqlite")) as saver,
-        AsyncSqliteStore.from_conn_string(str(settings.data_dir / "store.sqlite"), index=index) as store,
+        AsyncSqliteStore.from_conn_string(str(settings.data_dir / "store.sqlite")) as store,
     ):
         # 📘 LEARN — two databases, two lifetimes:
         #   checkpoints.sqlite : every state snapshot of every thread (short-term memory)

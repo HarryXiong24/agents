@@ -12,7 +12,7 @@
                    → graph.py: compact_context
 
   3. Long-term   — facts about the USER that survive across threads, stored in a
-                   LangGraph Store (key-value + optional vector search), namespaced
+                   LangGraph Store (key-value with keyword retrieval), namespaced
                    by user_id. Recalled at the start of each turn; written by tools.
                    → this file
 
@@ -64,8 +64,6 @@ async def save(store: BaseStore, user_id: str, content: str) -> str:
         key,
         {"content": content, "created_at": datetime.now(timezone.utc).isoformat()},
     )
-    # If the store was created with an `index` (embeddings), aput also embeds `content`
-    # automatically, making it searchable by meaning.
     return key
 
 
@@ -85,12 +83,8 @@ async def list_all(store: BaseStore, user_id: str, limit: int = 100) -> list[tup
 async def recall(store: BaseStore | None, user_id: str, query: str, k: int | None = None) -> list[str]:
     """Return up to k memories relevant to `query`, formatted as '[key] content'.
 
-    📘 LEARN — two retrieval strategies:
-      • Semantic (OLLAMA_EMBED_MODEL set): the store embeds the query and returns the
-        nearest memories by vector similarity. Matches meaning: "what do I drink?" finds
-        "prefers tea" even with no shared words.
-      • Keyword (default, zero setup): score memories by token overlap with the query.
-        Good enough for a demo and for hundreds of memories; misses synonyms.
+    📘 LEARN — keyword retrieval: score memories by token overlap with the query.
+    Good enough for a demo and for hundreds of memories; misses synonyms.
 
     Why recall only top-k instead of injecting ALL memories? Same reason as compaction:
     context is a budget. 500 memories in every prompt would be slow and distracting.
@@ -99,11 +93,7 @@ async def recall(store: BaseStore | None, user_id: str, query: str, k: int | Non
         return []
     k = k or settings.memory_recall_k
 
-    if settings.embed_model:  # semantic search through the store's vector index
-        items = await store.asearch(namespace(user_id), query=query, limit=k)
-        return [f"[{it.key}] {it.value['content']}" for it in items]
-
-    # Keyword fallback: score every memory by token overlap (fine for hundreds of items).
+    # Score every memory by token overlap (fine for hundreds of items).
     q = _tokens(query)
     scored = []
     for key, content in await list_all(store, user_id, limit=500):

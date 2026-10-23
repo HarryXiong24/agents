@@ -128,9 +128,10 @@ Most need a Groq API key; the ones marked *(offline)* only need `pytest`.
     *See:* `⇢ context compacted`. Run `/state` to read the summary. What details survived?
     Edit `SUMMARIZE_PROMPT` to keep different things and compare.
 
-13. **Semantic memory.** `ollama pull nomic-embed-text`, delete `data/store.sqlite`, run with
-    `OLLAMA_EMBED_MODEL=nomic-embed-text`. Save "I drink green tea every morning", then in a
-    new thread ask "what's my usual beverage?" (no shared words). Compare with keyword mode.
+13. **Keyword memory.** Save several preferences, including "I drink green tea every morning".
+    In a new thread, compare "what tea do I drink?" with "what's my usual beverage?".
+    Inspect `memory.recall`: shared tokens raise a memory's rank; when nothing matches,
+    it returns a few stored memories as general context. What are the limits of this approach?
 
 ### Level 5 — Extend it (build something)
 

@@ -1,4 +1,4 @@
-"""Offline checks for Groq configuration and optional memory embeddings."""
+"""Offline checks for Groq configuration."""
 
 from dataclasses import replace
 
@@ -30,18 +30,3 @@ def test_missing_groq_key_has_actionable_error(monkeypatch):
 
     with pytest.raises(ValueError, match="Set GROQ_API_KEY"):
         llm.get_chat_model()
-
-
-def test_optional_embeddings_use_separate_ollama_endpoint(monkeypatch):
-    monkeypatch.setattr(llm, "settings", replace(llm.settings, embed_model=None))
-    assert llm.get_embeddings() is None
-
-    monkeypatch.setattr(llm, "settings", replace(
-        llm.settings,
-        embed_model="nomic-embed-text",
-        base_url="https://groq.example",
-        embed_base_url="http://localhost:11434",
-    ))
-    embeddings = llm.get_embeddings()
-    assert embeddings.model == "nomic-embed-text"
-    assert embeddings.base_url == "http://localhost:11434"

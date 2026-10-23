@@ -33,10 +33,6 @@ class Settings:
     base_url: str = os.getenv("GROQ_BASE_URL") or "https://api.groq.com"
     # Low temperature = more deterministic tool calls. Agents want reliability, not creativity.
     temperature: float = float(os.getenv("GROQ_TEMPERATURE", "0.2"))
-    # Optional Ollama embeddings for semantic long-term memory; separate from Groq chat.
-    embed_model: str | None = os.getenv("OLLAMA_EMBED_MODEL") or None
-    embed_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    embed_dims: int = int(os.getenv("OLLAMA_EMBED_DIMS", "768"))  # nomic-embed-text = 768
 
     # ---- Loop engineering ----------------------------------------------------
     # 📘 LEARN: these are the knobs that bound the agent loop. See graph.py for the

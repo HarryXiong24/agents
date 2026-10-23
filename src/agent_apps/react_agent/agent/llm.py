@@ -35,16 +35,3 @@ def get_chat_model() -> BaseChatModel:
         temperature=settings.temperature,
         max_retries=3,
     )
-
-
-def get_embeddings():
-    """Return an Ollama embeddings object, or None if semantic memory is disabled.
-
-    Used by the long-term Store to turn memory text into vectors (see main.py `index=`).
-    🧪 TRY:  ollama pull nomic-embed-text && OLLAMA_EMBED_MODEL=nomic-embed-text python main.py
-    """
-    if not settings.embed_model:
-        return None
-    from langchain_ollama import OllamaEmbeddings
-
-    return OllamaEmbeddings(model=settings.embed_model, base_url=settings.embed_base_url)
