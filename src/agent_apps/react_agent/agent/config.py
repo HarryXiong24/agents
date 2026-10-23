@@ -14,7 +14,11 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 ROOT = Path(__file__).resolve().parent.parent  # repo root (parent of agent/)
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+load_dotenv(PROJECT_ROOT / ".env")
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -23,17 +27,15 @@ def _bool(name: str, default: bool) -> bool:
 
 @dataclass(frozen=True)  # frozen: settings can't be changed by accident at runtime
 class Settings:
-    # ---- Model (Ollama + Qwen) ------------------------------------------------
-    model: str = os.getenv("OLLAMA_MODEL", "qwen3:8b")
-    base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    # ---- Model (Groq) ---------------------------------------------------------
+    model: str = os.getenv("AGENT_MODEL") or "openai/gpt-oss-20b"
+    # The Groq SDK appends /openai/v1 to this host itself.
+    base_url: str = os.getenv("GROQ_BASE_URL") or "https://api.groq.com"
     # Low temperature = more deterministic tool calls. Agents want reliability, not creativity.
-    temperature: float = float(os.getenv("OLLAMA_TEMPERATURE", "0.2"))
-    # Ollama's default context window is small (2k–4k). Agents with tool output need more.
-    num_ctx: int = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
-    # Qwen3 "thinking" mode. Off by default: faster and cleaner tool calls.
-    reasoning: bool = _bool("OLLAMA_REASONING", False)
-    # Optional embedding model for semantic long-term memory (e.g. nomic-embed-text).
+    temperature: float = float(os.getenv("GROQ_TEMPERATURE", "0.2"))
+    # Optional Ollama embeddings for semantic long-term memory; separate from Groq chat.
     embed_model: str | None = os.getenv("OLLAMA_EMBED_MODEL") or None
+    embed_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     embed_dims: int = int(os.getenv("OLLAMA_EMBED_DIMS", "768"))  # nomic-embed-text = 768
 
     # ---- Loop engineering ----------------------------------------------------
@@ -52,7 +54,7 @@ class Settings:
 
     # ---- Context / memory management ----------------------------------------
     # Approximate tokens of message history before compaction kicks in. Deliberately
-    # well below num_ctx: system prompt + tool schemas + the answer need room too.
+    # below the model's context window: system prompt + tools + the answer need room too.
     context_token_budget: int = int(os.getenv("AGENT_CONTEXT_BUDGET", "6000"))
     keep_recent_messages: int = 6       # newest messages always kept verbatim
     memory_recall_k: int = 5            # long-term memories injected per turn

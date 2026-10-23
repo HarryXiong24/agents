@@ -23,20 +23,19 @@ import json
 import sys
 import uuid
 
-import httpx
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.store.sqlite.aio import AsyncSqliteStore
 from langgraph.types import Command
 
-from agent import memory
-from agent.config import settings
-from agent.graph import build_graph
-from agent.llm import get_chat_model, get_embeddings
-from agent.mcp_client import load_mcp_tools
-from agent.state import AgentContext
-from agent.tools import LOCAL_TOOLS
+from agent_apps.react_agent.agent import memory
+from agent_apps.react_agent.agent.config import settings
+from agent_apps.react_agent.agent.graph import build_graph
+from agent_apps.react_agent.agent.llm import get_chat_model, get_embeddings
+from agent_apps.react_agent.agent.mcp_client import load_mcp_tools
+from agent_apps.react_agent.agent.state import AgentContext
+from agent_apps.react_agent.agent.tools import LOCAL_TOOLS
 
 # ----------------------------------------------------------------------------- terminal styling
 DIM, BOLD, RESET = "\033[2m", "\033[1m", "\033[0m"
@@ -253,17 +252,6 @@ async def handle_command(cmd: str, *, graph, saver, store, session: dict) -> boo
 
 # ----------------------------------------------------------------------------- entry point
 
-async def check_ollama() -> None:
-    try:
-        async with httpx.AsyncClient(timeout=3) as client:
-            tags = (await client.get(f"{settings.base_url}/api/tags")).json()
-        names = {m["name"] for m in tags.get("models", [])}
-        if settings.model not in names and f"{settings.model}:latest" not in names:
-            print(f"{YELLOW}! Model '{settings.model}' not found in Ollama. Run: ollama pull {settings.model}{RESET}")
-    except Exception:
-        print(f"{RED}! Cannot reach Ollama at {settings.base_url}. Is `ollama serve` running?{RESET}")
-
-
 async def main() -> None:
     """Wire everything together and run the REPL.
 
@@ -278,11 +266,11 @@ async def main() -> None:
     parser.add_argument("--thread", default=None, help="resume an existing thread id")
     args = parser.parse_args()
 
+    model = get_chat_model()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.workspace_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"{BOLD}Atlas{RESET} · LangGraph ReAct agent · model={settings.model}")
-    await check_ollama()
 
     mcp_tools, report = await load_mcp_tools()
     for server, names in report.items():
@@ -304,7 +292,7 @@ async def main() -> None:
         #   checkpoints.sqlite : every state snapshot of every thread (short-term memory)
         #   store.sqlite       : long-term memories, independent of threads
         await store.setup()  # creates tables on first run (the saver does this lazily)
-        graph = build_graph(get_chat_model(), tools, checkpointer=saver, store=store)
+        graph = build_graph(model, tools, checkpointer=saver, store=store)
         session = {
             "thread_id": args.thread or uuid.uuid4().hex[:8],
             "ctx": AgentContext(user_id=args.user),

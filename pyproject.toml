@@ -8,18 +8,23 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "aiosqlite",
     "deepagents>=0.7.28",
     "gradio>=6.0",
     "grandalf>=0.8",
+    "httpx",
     "ipython>=9.17.1",
     "langchain>=1.4.6",
     "langchain-community>=0.4.2",
     "langchain-core>=1.6.9",
     "langchain-groq>=1.1.3",
+    "langchain-mcp-adapters>=0.2",
     "langchain-ollama>=1.1.0",
     "langchain-openai>=1.7.0",
     "langgraph>=1.2.14",
     "langgraph-checkpoint>=4.2.0",
+    "langgraph-checkpoint-sqlite>=3.0",
+    "mcp>=1.10",
     "openai>=3.3.0",
     "openai-agents>=0.23.1",
     "pydantic>=2.12.5",
@@ -36,6 +41,10 @@ dependencies = [
 resume-digging-agent = "agent_apps.resume_digging_agent.__main__:main"
 deep-research-agent = "agent_apps.deep_research_agent.__main__:main"
 agent-by-langgraph = "agent_apps.agent_by_langgraph.__main__:main"
+react-agent = "agent_apps.react_agent.__main__:main"
+
+[dependency-groups]
+dev = ["pytest"]
 
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]

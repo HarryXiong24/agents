@@ -25,12 +25,12 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
 
-from agent.config import settings
-from agent.graph import build_graph
-from agent.mcp_client import load_mcp_tools
-from agent.state import AgentContext
-from agent.tools import LOCAL_TOOLS
-from tests.fake_model import ScriptedChatModel, tool_call
+from agent_apps.react_agent.agent.config import settings
+from agent_apps.react_agent.agent.graph import build_graph
+from agent_apps.react_agent.agent.mcp_client import load_mcp_tools
+from agent_apps.react_agent.agent.state import AgentContext
+from agent_apps.react_agent.agent.tools import LOCAL_TOOLS
+from .fake_model import ScriptedChatModel, tool_call
 
 CTX = AgentContext(user_id="tester")
 
@@ -188,6 +188,64 @@ def test_ask_human_tool_interrupts_and_resumes():
     assert values["messages"][-1].content == "Got it: User answered: San Jose"
 
 
+def test_ask_human_checkpoint_resumes_in_rebuilt_graph():
+    def responder(msgs, tools_bound):
+        tms = turn_tool_msgs(msgs)
+        if not tms:
+            return AIMessage("", tool_calls=[tool_call(
+                "ask_human", {"question": "Which city?"}, call_id="city-question",
+            )])
+        return AIMessage(f"Got it: {tms[-1].content}")
+
+    saver = InMemorySaver()
+    store = InMemoryStore()
+    config = {"configurable": {"thread_id": "resume-question"}}
+
+    def new_graph():
+        return build_graph(ScriptedChatModel(responder=responder), LOCAL_TOOLS,
+                           checkpointer=saver, store=store)
+
+    async def run():
+        graph = new_graph()
+        await graph.ainvoke({"messages": [HumanMessage("weather?")]}, config, context=CTX)
+        paused = await graph.aget_state(config)
+        assert paused.next == ("tools",)
+        assert [item.value for item in paused.interrupts] == [
+            {"type": "question", "question": "Which city?"},
+        ]
+        assert not turn_tool_msgs(paused.values["messages"])
+
+        # Restore the checkpoint into a new graph instance, as a resumed caller would.
+        restored = new_graph()
+        await restored.ainvoke(Command(resume="San Jose"), config, context=CTX)
+        finished = await restored.aget_state(config)
+        assert finished.interrupts == ()
+        assert finished.next == ()
+        results = turn_tool_msgs(finished.values["messages"])
+        assert len(results) == 1
+        assert results[0].tool_call_id == "city-question"
+        assert results[0].status == "success"
+        assert results[0].content == "User answered: San Jose"
+        assert finished.values["messages"][-1].content == "Got it: User answered: San Jose"
+
+    asyncio.run(run())
+
+
+def test_tool_error_remains_an_observation():
+    def responder(msgs, tools_bound):
+        tms = turn_tool_msgs(msgs)
+        if not tms:
+            return AIMessage("", tool_calls=[tool_call("calculator", {"expression": "1/0"})])
+        assert tms[-1].status == "error"
+        assert "ZeroDivisionError" in tms[-1].content
+        return AIMessage("Cannot divide by zero.")
+
+    graph, _ = make_graph(responder, LOCAL_TOOLS)
+    values, interrupts = asyncio.run(drive(graph, "calculate 1/0", "tool-error"))
+    assert interrupts == []
+    assert values["messages"][-1].content == "Cannot divide by zero."
+
+
 def test_iteration_budget_forces_final_answer():
     set_setting("max_iterations", 3)
 
@@ -263,6 +321,40 @@ def test_long_term_memory_across_threads():
     (values, _) = asyncio.run(run())
     assert values["memories"] and "tea" in values["memories"][0]
     assert values["messages"][-1].content == "You prefer tea."
+
+
+@pytest.mark.filterwarnings("error:Pydantic serializer warnings:UserWarning")
+def test_memory_tools_preserve_context_without_serialization_warnings():
+    store = InMemoryStore()
+
+    def responder(msgs, tools_bound):
+        results = turn_tool_msgs(msgs)
+        assert all(result.status == "success" for result in results)
+        if not results:
+            call = tool_call("save_memory", {"content": "Prefers tea"})
+        elif len(results) == 1:
+            call = tool_call("search_memory", {"query": "tea"})
+        elif len(results) == 2:
+            assert "Prefers tea" in results[-1].content
+            assert "Another user's tea" not in results[-1].content
+            key = results[0].content.split("[", 1)[1].split("]", 1)[0]
+            call = tool_call("delete_memory", {"memory_id": key})
+        else:
+            assert results[-1].content.startswith("Deleted memory")
+            return AIMessage("Memory saved, found, and deleted.")
+        return AIMessage("", tool_calls=[call])
+
+    graph, _ = make_graph(responder, LOCAL_TOOLS, store=store)
+
+    async def run():
+        await store.aput(("memories", "other-user"), "other", {"content": "Another user's tea"})
+        values, interrupts = await drive(graph, "exercise memory tools", "memory-tools")
+        assert interrupts == []
+        assert values["messages"][-1].content == "Memory saved, found, and deleted."
+        assert await store.asearch(("memories", CTX.user_id)) == []
+        assert await store.aget(("memories", "other-user"), "other") is not None
+
+    asyncio.run(run())
 
 
 def test_reflection_revises_draft_once():

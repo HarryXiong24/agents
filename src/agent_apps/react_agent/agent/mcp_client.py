@@ -13,7 +13,7 @@
        and JSON-Schema for its inputs.
     3. langchain-mcp-adapters wraps each one as a LangChain BaseTool whose `ainvoke`
        sends `tools/call` to the server.
-    4. bind_tools() turns those BaseTools into function-calling schemas for Qwen.
+    4. bind_tools() turns those BaseTools into function-calling schemas for the chat model.
 
     So MCP is a *standard way to serve tools*; it sits on top of function calling, it does
     not replace it. The model never knows a tool came from MCP.

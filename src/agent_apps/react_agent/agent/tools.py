@@ -31,6 +31,7 @@ from langgraph.types import interrupt
 
 from . import memory
 from .config import settings
+from .state import AgentContext
 
 # =========================================================================== utilities
 
@@ -62,7 +63,7 @@ def calculator(expression: str) -> str:
     """Evaluate an arithmetic expression, e.g. '(3 + 4) * 2 ** 3 / 7'. Supports + - * / // % **."""
     # 📘 LEARN: LLMs are unreliable at arithmetic; a calculator tool is the classic
     # "give the model a tool for what it's bad at" example. If the expression is invalid,
-    # the ValueError becomes an error ToolMessage (handle_tool_errors=True in graph.py)
+    # the ValueError becomes an error ToolMessage (_handle_tool_error in graph.py)
     # and the model can retry with a corrected expression.
     result = _safe_eval(ast.parse(expression, mode="eval"))
     return str(round(result, 10))
@@ -125,7 +126,7 @@ def ask_human(question: str) -> str:
 
 
 # =========================================================================== long-term memory tools
-# 📘 LEARN — ToolRuntime injection: a parameter named `runtime` typed `ToolRuntime` is
+# 📘 LEARN — ToolRuntime injection: `runtime: ToolRuntime[AgentContext]` is
 # filled in by LangGraph at call time and is HIDDEN from the schema the model sees.
 # The model only sees `content: str`. Through runtime we reach:
 #     runtime.store    → the long-term Store passed to graph.compile(store=...)
@@ -134,6 +135,7 @@ def ask_human(question: str) -> str:
 #     runtime.tool_call_id
 # This keeps per-user scoping out of the model's hands: it cannot write to another
 # user's memory because it never controls user_id.
+# The context type also tells Pydantic how to serialize the injected user context.
 #
 # 📘 LEARN — "hot path" memory writes: the model decides what to remember, during the
 # conversation, by calling save_memory. The alternative is a background job that extracts
@@ -141,7 +143,7 @@ def ask_human(question: str) -> str:
 # background = no latency but less control. This repo uses hot path.
 
 @tool
-async def save_memory(content: str, runtime: ToolRuntime) -> str:
+async def save_memory(content: str, runtime: ToolRuntime[AgentContext]) -> str:
     """Save a durable fact or preference about the user to long-term memory
     (persists across conversations). Write it as a short standalone sentence."""
     key = await memory.save(runtime.store, runtime.context.user_id, content)
@@ -149,7 +151,7 @@ async def save_memory(content: str, runtime: ToolRuntime) -> str:
 
 
 @tool
-async def search_memory(query: str, runtime: ToolRuntime) -> str:
+async def search_memory(query: str, runtime: ToolRuntime[AgentContext]) -> str:
     """Search long-term memory for facts about the user."""
     # prepare_turn already auto-recalls the top-k memories each turn; this tool lets the
     # model dig deeper when those weren't enough (agentic retrieval).
@@ -158,7 +160,7 @@ async def search_memory(query: str, runtime: ToolRuntime) -> str:
 
 
 @tool
-async def delete_memory(memory_id: str, runtime: ToolRuntime) -> str:
+async def delete_memory(memory_id: str, runtime: ToolRuntime[AgentContext]) -> str:
     """Delete a long-term memory by its id (the value in [brackets])."""
     # Memory needs an update/forget path too, e.g. "I moved to Seattle" should
     # replace "lives in San Jose", not sit next to it.

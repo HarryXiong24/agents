@@ -20,23 +20,22 @@ does math, runs shell commands and remembers facts about you). The point is the 
 | MCP | `mcp_servers/`, `agent/mcp_client.py` | Own MCP server over stdio, loaded with `langchain-mcp-adapters` |
 | Tools | `agent/tools.py` | Local `@tool`s, `ToolRuntime` injection, tool-call interceptor |
 | Memory | `agent/memory.py`, `compact_context` | Checkpointer (short-term), rolling summary (compaction), Store (long-term) |
-| Model | `agent/llm.py` | Qwen via local Ollama (`ChatOllama`) |
+| Model | `agent/llm.py` | Groq (`ChatGroq`, default: `openai/gpt-oss-20b`) |
 
 ---
 
 ## 1. Quick start
 
 ```bash
-# 1) Model
-ollama pull qwen3:8b            # any Qwen with tool calling works: qwen3:4b, qwen2.5:7b ...
-ollama serve                    # if not already running
+# 1) Groq credentials (or set GROQ_API_KEY in the repository root .env)
+export GROQ_API_KEY="your-groq-api-key"
+# Optional: export AGENT_MODEL="openai/gpt-oss-20b"
 
-# 2) Python 3.11+
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+# 2) Python 3.12+ (from the repository root)
+uv sync
 
 # 3) Run
-python main.py --user harry
+uv run react-agent --user harry
 ```
 
 Try these in order — each one exercises a different mechanism:
@@ -52,14 +51,16 @@ you> run a shell command                            # vague → agent may call a
 /state   /history   /memory   /graph                # inspect what happened
 ```
 
-Configuration is environment-driven (see `.env.example`), e.g.
-`OLLAMA_MODEL=qwen3:14b AGENT_MAX_ITERATIONS=12 python main.py`.
+Configuration is environment-driven (see `.env.example`); the repository root `.env` is
+loaded automatically, with exported environment variables taking precedence. For example:
+`AGENT_MODEL=openai/gpt-oss-20b AGENT_MAX_ITERATIONS=12 uv run react-agent`.
 
-Offline tests (no Ollama needed — a scripted fake model drives the real graph and the real MCP server):
+Offline tests (no Groq API key or Ollama needed — a scripted fake model drives the real graph and the real MCP server):
 
 ```bash
-python -m pytest -q        # 11 tests: ReAct, HITL approve/edit/reject, ask_human,
-                           # step budget, loop guard, compaction, cross-thread memory, reflection
+# 17 tests: ReAct, HITL approve/edit/reject, ask_human/resume, tool errors, step budget, loop guard,
+# compaction, cross-thread memory, reflection, Groq configuration and embeddings.
+uv run python -m pytest src/agent_apps/react_agent/tests -q
 ```
 
 ---
@@ -88,7 +89,7 @@ graph TD
 |---|---|
 | `prepare_turn` | Runs once per user message. Resets per-turn counters; recalls relevant long-term memories into state. |
 | `compact_context` | If the thread exceeds the token budget, summarises old messages into `summary` and deletes them. |
-| `agent` | Builds a fresh system prompt from state, calls Qwen. On the last allowed step it calls the model **without tools** to force an answer. |
+| `agent` | Builds a fresh system prompt from state, calls Groq. On the last allowed step it calls the model **without tools** to force an answer. |
 | `approval_gate` | `interrupt()`s with the risky calls. Applies the human's decisions to the pending tool calls. |
 | `tools` | `ToolNode` over local + MCP tools, with an interceptor that blocks rejected calls and normalises outputs. |
 | `loop_guard` | Detects identical repeated calls and error streaks; writes a warning that the next prompt includes. |
@@ -97,7 +98,7 @@ graph TD
 ### 2.2 Project layout
 
 ```text
-langgraph-agent/
+src/agent_apps/react_agent/
 ├── main.py                     # console REPL: streaming, interrupt handling, slash commands
 ├── mcp_servers.json            # which MCP servers to launch (stdio / http / sse)
 ├── mcp_servers/
@@ -110,7 +111,7 @@ langgraph-agent/
 │   ├── tools.py                # local tools incl. ask_human + memory tools
 │   ├── memory.py               # long-term memory (Store) helpers + recall
 │   ├── mcp_client.py           # MCP → LangChain tool adapter
-│   └── llm.py                  # ChatOllama (Qwen) + optional embeddings
+│   └── llm.py                  # ChatGroq + optional Ollama embeddings
 ├── tests/                      # offline tests with a scripted model
 ├── LEARNING.md                 # reading order, exercises, self-check questions
 ├── workspace/                  # the sandbox the agent's file tools operate on
@@ -128,14 +129,14 @@ langgraph-agent/
                                     │                                   │
                 ┌───────────────────▼──────────────┐      ┌─────────────▼─────────────┐
                 │ Compiled StateGraph              │      │ AsyncSqliteSaver          │
-                │  nodes ── ChatOllama(qwen3) ─────┼──┐   │  checkpoints.sqlite       │ ← short-term memory,
+                │  nodes ── ChatGroq(model)   ─────┼──┐   │  checkpoints.sqlite       │ ← short-term memory,
                 │  tools ── local @tool funcs      │  │   │  (state after every step) │   pause/resume, history
                 │        └─ MCP tools ─────────────┼─┐│   └───────────────────────────┘
                 └──────────────────────────────────┘ ││   ┌───────────────────────────┐
                                                      ││   │ AsyncSqliteStore          │ ← long-term memory
                      stdio (JSON-RPC) ◀──────────────┘│   │  store.sqlite             │   namespace=("memories", user)
            ┌──────────────────────────┐               │   └───────────────────────────┘
-           │ workspace_server.py (MCP)│               └──▶ Ollama HTTP :11434
+           │ workspace_server.py (MCP)│               └──▶ Groq HTTPS API
            └──────────────────────────┘
 ```
 
@@ -174,7 +175,7 @@ layers, from soft to hard:
 |---|---|---|---|
 | 1 | **Budget awareness** | ≤ 2 steps left | System prompt tells the model to wrap up. |
 | 2 | **Forced final answer** | step == `max_iterations` (default 8) | `agent` calls the model *without* tools bound, so it physically cannot call another tool and must answer. Graceful, not a crash. |
-| 3 | **Error-as-observation** | a tool raises | `ToolNode(handle_tool_errors=True)` turns exceptions into `ToolMessage(status="error")`; the model reads the error and self-corrects (wrong path, bad args…). |
+| 3 | **Error-as-observation** | a tool raises | `ToolNode(handle_tool_errors=_handle_tool_error)` turns tool failures into `ToolMessage(status="error")`, while allowing graph interrupts to propagate; the model reads the error and self-corrects (wrong path, bad args…). |
 | 4 | **Loop guard** | same `name(args)` ≥ 3× in a turn, or ≥ 3 consecutive errors | `loop_guard` writes `loop_warning`; the next system prompt contains it, steering the model out of the rut. |
 | 5 | **Hard fuse** | > `recursion_limit` super-steps (60) | LangGraph raises `GraphRecursionError`; the REPL reports it. Should never fire if 1–4 work. |
 
@@ -238,7 +239,7 @@ mcp_servers.json ──▶ MultiServerMCPClient ──spawn──▶ python work
                          ▼
              MCP tool schema (JSON Schema)  ──adapter──▶  LangChain BaseTool
                          │                                    │
-                         └──────── bind_tools() ─────────────▶ Qwen sees: write_file(path, content, append)
+                         └──────── bind_tools() ─────────────▶ the model sees: write_file(path, content, append)
              model calls write_file ─▶ adapter ─▶ tools/call over stdio ─▶ server executes ─▶ result
 ```
 
@@ -322,10 +323,11 @@ class AgentContext:                       # per-run, not persisted
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `OLLAMA_MODEL` | `qwen3:8b` | Any tool-calling Qwen in Ollama |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | |
-| `OLLAMA_REASONING` | `false` | Qwen3 thinking mode (slower, sometimes better plans) |
-| `OLLAMA_NUM_CTX` | `16384` | Ollama context window |
+| `GROQ_API_KEY` | *(required)* | Groq API key, read when creating the chat model |
+| `AGENT_MODEL` | `openai/gpt-oss-20b` | Groq model with tool calling |
+| `GROQ_BASE_URL` | `https://api.groq.com` | SDK host; do not append `/openai/v1` |
+| `GROQ_TEMPERATURE` | `0.2` | Chat model temperature |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Used only for optional embeddings |
 | `OLLAMA_EMBED_MODEL` | *(unset)* | e.g. `nomic-embed-text` → semantic memory recall |
 | `AGENT_MAX_ITERATIONS` | `8` | ReAct step budget per turn |
 | `AGENT_MAX_REFLECTIONS` | `1` | Critic revisions per turn |
@@ -341,8 +343,8 @@ class AgentContext:                       # per-run, not persisted
 
 ## 7. Notes & limits
 
-- Small local models occasionally emit malformed tool calls; the error-as-observation and loop
-  guard layers exist precisely for this. `qwen3:8b` or larger is recommended; `qwen3:4b` works for demos.
+- Models occasionally emit malformed tool calls; the error-as-observation and loop
+  guard layers exist precisely for this. Choose a Groq model that supports tool calling.
 - If switching `OLLAMA_EMBED_MODEL` on or off, delete `data/store.sqlite` (the vector index
   dimensions are fixed at creation).
 - `run_shell` executes real commands in `./workspace` — that's why it's behind approval.

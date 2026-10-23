@@ -1,4 +1,4 @@
-"""A deterministic chat model for offline tests (no Ollama needed).
+"""A deterministic chat model for offline tests (no Groq API access needed).
 
 `responder(messages, tools_bound)` decides what the "LLM" says, so tests can script
 exact ReAct trajectories, critic verdicts and summaries.

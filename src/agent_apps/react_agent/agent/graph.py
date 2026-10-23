@@ -71,6 +71,7 @@ from langchain_core.messages import (
 )
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.tools import BaseTool
+from langgraph.errors import GraphBubbleUp
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
@@ -154,6 +155,15 @@ def _parse_json(text: str) -> dict:
 MAX_TOOL_OUTPUT = 4000  # characters; roughly 1k tokens
 
 
+def _handle_tool_error(error: Exception) -> str:
+    """Keep graph control flow separate from recoverable tool failures."""
+    # ToolNode's wrapper error handler can also catch interrupts from execute().
+    # They must reach the graph runner so it checkpoints and waits for a resume.
+    if isinstance(error, GraphBubbleUp):
+        raise error
+    return f"Error: {error!r}\n Please fix your mistakes."
+
+
 def _normalize_tool_result(result):
     """Flatten MCP content blocks to plain text and cap the size.
 
@@ -184,7 +194,7 @@ def build_graph(
     """Assemble and compile the agent graph.
 
     📘 LEARN — dependency injection: the model, tools, checkpointer and store are all
-    passed in. That is why tests can swap Qwen for a scripted fake model and SQLite for
+    passed in. That is why tests can swap the Groq model for a scripted fake model and SQLite for
     in-memory storage while exercising exactly the same graph.
 
     Nodes are defined as *closures* inside this function so they can use `model`,
@@ -196,7 +206,7 @@ def build_graph(
     # JSON-Schema "function" definition and attaches it to every request. The model then
     # replies either with text or with structured `tool_calls`. This is function calling;
     # ReAct on top of it is just "loop until there are no more tool_calls".
-    # 🧪 TRY: print(tools[0].tool_call_schema.model_json_schema()) to see what Qwen sees.
+    # 🧪 TRY: print(tools[0].tool_call_schema.model_json_schema()) to see what the model sees.
     model_with_tools = model.bind_tools(tools)
 
     # ------------------------------------------------------------------ node: prepare_turn
@@ -418,13 +428,14 @@ def build_graph(
     # ToolMessage per call.
     #
     # 📘 LEARN — loop engineering layer 3, error-as-observation: with
-    # handle_tool_errors=True an exception (bad path, invalid args, timeout...) becomes a
+    # _handle_tool_error an exception (bad path, invalid args, timeout...) becomes a
     # ToolMessage(status="error", content="Error: ..."). The model reads the error and can
     # fix its own mistake on the next step, instead of the whole run crashing.
-    # (GraphInterrupt is special-cased and still propagates, so ask_human keeps working.)
+    # Our handler re-raises GraphBubbleUp (including GraphInterrupt), even when the
+    # tool-call wrapper catches it, so ask_human pauses and resumes correctly.
     tool_node = ToolNode(
         tools,
-        handle_tool_errors=True,
+        handle_tool_errors=_handle_tool_error,
         awrap_tool_call=enforce_hitl,
     )
 

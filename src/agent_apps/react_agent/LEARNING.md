@@ -68,7 +68,7 @@ warnings and budget that matter *now*.
 ## Exercises
 
 Do them roughly in order. Each has a "what you should see" so you can check yourself.
-Most need Ollama running; the ones marked *(offline)* only need `pytest`.
+Most need a Groq API key; the ones marked *(offline)* only need `pytest`.
 
 ### Level 1 — Observe
 
@@ -97,7 +97,7 @@ Most need Ollama running; the ones marked *(offline)* only need `pytest`.
    interrupt on startup and offer to resume it.)
 
 6. **Model-initiated HITL.** Ask something vague like `run a command for me`.
-   *See:* `🙋 Agent asks:`. If Qwen doesn't ask, strengthen the `ask_human` docstring
+   *See:* `🙋 Agent asks:`. If the model doesn't ask, strengthen the `ask_human` docstring
    and observe how much the docstring changes behaviour.
 
 ### Level 3 — Loop engineering
@@ -168,7 +168,7 @@ Answer these without looking; then verify in the code.
 6. Name the five loop-engineering layers from softest to hardest.
 7. Why is approval a config policy rather than something the model decides?
 8. Where does an MCP tool's description come from, and who reads it?
-9. Why can tests run the full graph without Ollama?
+9. Why can tests run the full graph without Groq API access?
 10. When would you choose background memory extraction over the `save_memory` tool?
 
 <details>
