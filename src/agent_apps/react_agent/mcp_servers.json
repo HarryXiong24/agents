@@ -1,8 +1,8 @@
 {
-  "workspace": {
+  "expenses": {
     "transport": "stdio",
     "command": "${PYTHON}",
-    "args": ["${ROOT}/mcp_servers/workspace_server.py"],
-    "env": { "WORKSPACE_DIR": "${ROOT}/workspace" }
+    "args": ["${ROOT}/mcp_servers/expense_server.py"],
+    "env": { "LEDGER_DB": "${LEDGER_DB}" }
   }
 }

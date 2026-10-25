@@ -1,18 +1,11 @@
-"""Console front-end for the Atlas agent.
+"""Console for Ledger: uv run react-agent --user harry [--thread ID].
+📘 LEARN: the graph is independent of the terminal. This caller wires services, streams
+node updates, handles interrupts/resume, and exposes inspection commands.
+A web UI could replace this file without changing the graph.
 
-    python main.py                      # new thread, user "default"
-    python main.py --user harry         # long-term memory is per user
-    python main.py --thread <id>        # resume an earlier conversation
-
-📘 LEARN — this file is the *application* around the graph. The graph knows nothing
-about terminals; main.py is responsible for:
-    1. Wiring infrastructure: model, local + MCP tools, checkpointer, store.
-    2. Running one user turn with streaming, so you see each node as it finishes.
-    3. The CALLER side of human-in-the-loop: noticing the graph paused, asking the
-       human, and resuming with Command(resume=...).
-    4. Slash commands that inspect persisted state (/state, /history, /memory).
-
-Swap this file for a FastAPI endpoint or a Slack bot and the graph stays identical.
+Ledger 控制台：uv run react-agent --user harry [--thread ID]。
+📘 LEARN：图不依赖终端。调用方负责连接服务、流式展示节点更新、
+处理暂停与恢复，并提供检查命令。可以替换为网页入口而不修改图。
 """
 
 from __future__ import annotations
@@ -21,6 +14,7 @@ import argparse
 import asyncio
 import json
 import sys
+import threading
 import uuid
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -30,16 +24,21 @@ from langgraph.store.sqlite.aio import AsyncSqliteStore
 from langgraph.types import Command
 
 from agent_apps.react_agent.agent import memory
-from agent_apps.react_agent.agent.config import settings
+from agent_apps.react_agent.agent.config import settings, user_data_dir
 from agent_apps.react_agent.agent.graph import build_graph
 from agent_apps.react_agent.agent.llm import get_chat_model
 from agent_apps.react_agent.agent.mcp_client import load_mcp_tools
 from agent_apps.react_agent.agent.state import AgentContext
 from agent_apps.react_agent.agent.tools import LOCAL_TOOLS
 
-# ----------------------------------------------------------------------------- terminal styling
 DIM, BOLD, RESET = "\033[2m", "\033[1m", "\033[0m"
-CYAN, GREEN, YELLOW, RED, MAGENTA = "\033[36m", "\033[32m", "\033[33m", "\033[31m", "\033[35m"
+CYAN, GREEN, YELLOW, RED, MAGENTA = (
+    "\033[36m",
+    "\033[32m",
+    "\033[33m",
+    "\033[31m",
+    "\033[35m",
+)
 
 
 def short(value, n: int = 160) -> str:
@@ -49,31 +48,71 @@ def short(value, n: int = 160) -> str:
 
 
 async def ask(prompt: str) -> str:
-    return (await asyncio.to_thread(input, prompt)).strip()
+    """Read terminal input without keeping process shutdown waiting after Ctrl+C.
+    A daemon thread can wait for input; the event-loop thread owns the result Future.
+
+    读取终端输入，避免 Ctrl+C 后进程仍等待输入线程结束。
+    守护线程等待输入；结果 Future 由事件循环线程操作。
+    """
+    loop = asyncio.get_running_loop()
+    answer = loop.create_future()
+
+    def finish(value, error):
+        if answer.done():
+            return
+        if error is not None:
+            answer.set_exception(error)
+        else:
+            answer.set_result(value)
+
+    def read():
+        value, error = None, None
+        try:
+            value = input(prompt).strip()
+        except Exception as exc:
+            error = exc
+        try:
+            loop.call_soon_threadsafe(finish, value, error)
+        except RuntimeError:
+            # Cancellation may already have closed the loop; no answer is needed then.
+            # 取消后事件循环可能已关闭，此时不再需要传回输入结果。
+            pass
+
+    # The default executor waits for input() at shutdown. A daemon thread does not.
+    # 默认线程池在关闭时会等待 input()；守护线程不会阻止进程退出。
+    threading.Thread(target=read, daemon=True, name="ledger-console-input").start()
+    return await answer
 
 
-HELP = f"""{BOLD}Commands{RESET}
-  /new              start a new conversation thread
-  /threads          list saved threads          /switch <id>   resume a thread
-  /state            show loop counters, summary and context size
-  /history          list checkpoints of the current thread (time-travel log)
-  /memory           list long-term memories     /forget <id>   delete one
-  /tools            list tools (⚠ = needs approval)
-  /graph            print the graph as Mermaid
-  /help             this help                   /quit          exit"""
+HELP = f"""{BOLD}Commands / 命令{RESET}
+  /new              Start a new thread
+                    新建会话
+  /threads          List this user's saved threads
+                    查看当前用户的会话
+  /switch <id>      Switch threads and resume pending interrupts
+                    切换会话并恢复待处理中断
+  /state            Inspect counters, summary and context size
+                    检查计数器、摘要和上下文大小
+  /history          Inspect checkpoints (not a ledger undo command)
+                    检查检查点（不是账本撤销命令）
+  /memory           List preferences     /forget <id>   Delete a preference
+                    查看偏好                              删除偏好
+  /tools            List tools (⚠ = approval required)
+                    查看工具（⚠ 表示需要审批）
+  /graph            Print the Mermaid graph
+                    输出 Mermaid 图
+  /help             Show help            /quit          Exit
+                    显示帮助                              退出"""
 
-
-# ----------------------------------------------------------------------------- rendering of graph events
 
 def render_update(node: str, update: dict | None) -> None:
-    """Pretty-print one streamed event.
+    """Render node updates from stream_mode="updates".
+    Other modes: values=full state, messages=model tokens, custom=application events.
+    A list of modes combines streams; rejected drafts need care when streaming tokens.
 
-    📘 LEARN — stream modes: `graph.astream(..., stream_mode="updates")` yields
-    `{node_name: the_update_that_node_returned}` after each node finishes. Other modes:
-        "values"   → the full state after each step
-        "messages" → LLM tokens as they are generated (for typewriter-style output)
-        "custom"   → anything a node/tool writes via get_stream_writer()
-    You can pass a list, e.g. ["updates", "messages"], to get several at once.
+    展示 stream_mode="updates" 返回的节点更新。
+    其他模式：values 为完整状态，messages 为模型 token，custom 为自定义事件。
+    可以组合多个模式；逐 token 展示时需考虑被反思否决的草稿如何呈现。
     """
     if not update:
         return
@@ -84,7 +123,9 @@ def render_update(node: str, update: dict | None) -> None:
                     print(f"{DIM}  💭 {short(msg.content, 200)}{RESET}")
                 for tc in msg.tool_calls:
                     risky = " ⚠" if tc["name"] in settings.risky_tools else ""
-                    print(f"{CYAN}  → {tc['name']}{risky}({short(tc['args'], 140)}){RESET}")
+                    print(
+                        f"{CYAN}  → {tc['name']}{risky}({short(tc['args'], 140)}){RESET}"
+                    )
     elif node == "tools":
         for msg in update.get("messages", []):
             if isinstance(msg, ToolMessage):
@@ -94,27 +135,27 @@ def render_update(node: str, update: dict | None) -> None:
         print(f"{YELLOW}  ⚠ loop guard: {short(update['loop_warning'], 200)}{RESET}")
     elif node == "compact_context" and update.get("summary"):
         n = len(update.get("messages", []))
-        print(f"{MAGENTA}  ⇢ context compacted: {n} old messages folded into the summary{RESET}")
+        print(
+            f"{MAGENTA}  ⇢ context compacted: {n} old messages folded into the summary{RESET}"
+        )
     elif node == "reflect":
         critique = update.get("critique")
         if critique:
-            print(f"{MAGENTA}  ✎ critic asked for a revision: {short(critique['feedback'], 200)}{RESET}")
+            print(
+                f"{MAGENTA}  ✎ critic asked for a revision: {short(critique['feedback'], 200)}{RESET}"
+            )
         else:
             print(f"{DIM}  ✓ critic approved the answer{RESET}")
     elif node == "prepare_turn" and update.get("memories"):
         print(f"{DIM}  ⓜ recalled {len(update['memories'])} memory item(s){RESET}")
 
 
-# ----------------------------------------------------------------------------- human-in-the-loop prompts
-
 async def handle_interrupt(payload: dict):
-    """Turn an interrupt payload into a resume value by asking the human.
+    """Collect a response to an approval or clarification payload.
+    The payload shape is the contract between the graph and the user interface.
 
-    📘 LEARN: the payload is whatever the graph passed to `interrupt(...)`. Its shape is a
-    contract between graph and caller — here a "type" field says which UI to show:
-        {"type": "question", "question": ...}            ← from the ask_human tool
-        {"type": "approval", "calls": [{id,name,args}]}   ← from approval_gate
-    The return value becomes the result of `interrupt()` inside the graph.
+    收集审批或澄清问题的回答。
+    payload 的结构是图与用户界面之间的约定。
     """
     if payload.get("type") == "question":
         print(f"\n{YELLOW}{BOLD}🙋 Agent asks:{RESET} {payload['question']}")
@@ -127,7 +168,9 @@ async def handle_interrupt(payload: dict):
             print(f"{YELLOW}  {call['name']}{RESET}")
             print(json.dumps(call["args"], ensure_ascii=False, indent=4))
             while True:
-                choice = (await ask("  [a]pprove / [e]dit args / [r]eject ? ")).lower()[:1]
+                choice = (await ask("  [a]pprove / [e]dit args / [r]eject ? ")).lower()[
+                    :1
+                ]
                 if choice in ("a", ""):
                     decisions[call["id"]] = {"action": "approve"}
                     break
@@ -138,9 +181,14 @@ async def handle_interrupt(payload: dict):
                 if choice == "e":
                     raw = await ask("  new args as JSON: ")
                     try:
-                        decisions[call["id"]] = {"action": "edit", "args": json.loads(raw)}
+                        new_args = json.loads(raw)
+                        if not isinstance(new_args, dict):
+                            raise ValueError(
+                                "Arguments must be a JSON object / 参数必须是 JSON 对象"
+                            )
+                        decisions[call["id"]] = {"action": "edit", "args": new_args}
                         break
-                    except json.JSONDecodeError as exc:
+                    except ValueError as exc:
                         print(f"{RED}  invalid JSON: {exc}{RESET}")
         return {"decisions": decisions}
 
@@ -148,46 +196,57 @@ async def handle_interrupt(payload: dict):
     return None
 
 
-# ----------------------------------------------------------------------------- one user turn
-
 async def run_turn(graph, payload, config: dict, ctx: AgentContext) -> None:
-    """Run one user turn to completion, handling any number of interrupts.
+    """Stream until completion or pause; answer interrupts and resume the SAME thread.
+    ⚠ PITFALL: Command(resume=...) answers a pending interrupt; a new HumanMessage does not.
 
-    📘 LEARN — the HITL driver loop:
-
-        payload = {"messages": [HumanMessage]}        # first call: new input
-        loop:
-            stream the graph until it ENDS or PAUSES
-            snapshot = aget_state(config)              # read the latest checkpoint
-            paused?  snapshot.interrupts is non-empty
-                     → ask human → payload = Command(resume=answer) → loop again
-            else     → done
-
-    ⚠ PITFALL: resuming must use the SAME thread_id (it's in `config`). The thread_id is
-    how LangGraph finds the checkpoint where the graph paused. A different thread_id
-    would start a brand new conversation instead.
-    ⚠ PITFALL: resume with Command(resume=...), not a new {"messages": [...]} input.
-    Sending new input to a paused thread does not answer the pending interrupt.
+    流式运行到完成或暂停；回答中断并恢复同一个会话。
+    ⚠ PITFALL：必须用 Command(resume=...) 回答待处理的中断，不能用新 HumanMessage 替代。
     """
     while True:
-        async for chunk in graph.astream(payload, config, context=ctx, stream_mode="updates"):
+        async for chunk in graph.astream(
+            payload, config, context=ctx, stream_mode="updates"
+        ):
             for node, update in chunk.items():
                 if node != "__interrupt__":
                     render_update(node, update)
         snapshot = await graph.aget_state(config)
-        if snapshot.interrupts:                       # graph paused: ask the human, then resume
-            resume = await handle_interrupt(snapshot.interrupts[0].value)
-            payload = Command(resume=resume)
+        if snapshot.interrupts:
+            payload = await resume_command(snapshot.interrupts)
             continue
         break
 
     messages = snapshot.values.get("messages", [])
     final = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
     if final is not None and final.content:
-        print(f"\n{BOLD}Atlas:{RESET} {final.content}\n")
+        print(f"\n{BOLD}Ledger:{RESET} {final.content}\n")
 
 
-# ----------------------------------------------------------------------------- commands
+async def resume_command(interrupts) -> Command:
+    """Collect each pending answer by interrupt ID. ToolNode questions use one combined call.
+
+    按 interrupt ID 收集每个待处理回答。ToolNode 的多个问题应合并为一次调用。
+    """
+    answers = {}
+    for pending in interrupts:
+        answers[pending.id] = await handle_interrupt(pending.value)
+    return Command(resume=answers)
+
+
+async def resume_pending(graph, config: dict, ctx: AgentContext) -> bool:
+    """Resume saved interrupts before new input after startup or a thread switch.
+
+    启动或切换会话后，先恢复持久化中断，再接受新的输入。
+    """
+    snapshot = await graph.aget_state(config)
+    if not snapshot.interrupts:
+        return False
+    print(
+        "Resuming a pending approval or question.\n发现待处理的审批或提问，继续上次会话。"
+    )
+    await run_turn(graph, await resume_command(snapshot.interrupts), config, ctx)
+    return True
+
 
 async def list_threads(saver: AsyncSqliteSaver) -> list[str]:
     seen: dict[str, None] = {}
@@ -197,9 +256,15 @@ async def list_threads(saver: AsyncSqliteSaver) -> list[str]:
 
 
 async def handle_command(cmd: str, *, graph, saver, store, session: dict) -> bool:
-    """Return False to quit."""
+    """Inspect state, history, memories and tools; return False to quit.
+
+    检查状态、历史、记忆和工具；返回 False 表示退出。
+    """
     name, _, arg = cmd.partition(" ")
-    config = {"configurable": {"thread_id": session["thread_id"]}, "recursion_limit": settings.recursion_limit}
+    config = {
+        "configurable": {"thread_id": session["thread_id"]},
+        "recursion_limit": settings.recursion_limit,
+    }
     user_id = session["ctx"].user_id
 
     if name in ("/quit", "/exit"):
@@ -220,19 +285,26 @@ async def handle_command(cmd: str, *, graph, saver, store, session: dict) -> boo
         v = (await graph.aget_state(config)).values
         msgs = v.get("messages", [])
         print(f"  thread        : {session['thread_id']}")
-        print(f"  messages      : {len(msgs)} (~{count_tokens_approximately(msgs)} tokens, "
-              f"budget {settings.context_token_budget})")
-        print(f"  last turn     : iterations={v.get('iterations', 0)}/{settings.max_iterations}, "
-              f"reflections={v.get('reflections', 0)}/{settings.max_reflections}")
+        print(
+            f"  messages      : {len(msgs)} (~{count_tokens_approximately(msgs)} tokens, "
+            f"budget {settings.context_token_budget})"
+        )
+        print(
+            f"  last turn     : iterations={v.get('iterations', 0)}/{settings.max_iterations}, "
+            f"reflections={v.get('reflections', 0)}/{settings.max_reflections}"
+        )
         print(f"  summary       : {v.get('summary') or '(none)'}")
     elif name == "/history":
-        # 📘 LEARN — every super-step is a checkpoint. You could pass any of these
-        # checkpoint configs back to graph.astream(None, that_config) to replay from that
-        # point, or aupdate_state(...) to fork with edited state: "time travel".
+        # 📘 LEARN: each snapshot records a super-step. Its config can support replay or branching
+        # with aupdate_state; replaying side-effecting tools needs separate care.
+        # 📘 LEARN：每个快照记录一个 super-step，其配置可用于重放或配合 aupdate_state 分支。
+        # 重放有副作用的工具需要另外处理。
         async for snap in graph.aget_state_history(config):
             step = snap.metadata.get("step")
-            print(f"  step {step:>3}  next={list(snap.next) or ['END']}  "
-                  f"checkpoint={snap.config['configurable']['checkpoint_id'][-8:]}")
+            print(
+                f"  step {step:>3}  next={list(snap.next) or ['END']}  "
+                f"checkpoint={snap.config['configurable']['checkpoint_id'][-8:]}"
+            )
     elif name == "/memory":
         items = await memory.list_all(store, user_id)
         print("\n".join(f"  [{k}] {c}" for k, c in items) or "  (no memories yet)")
@@ -250,76 +322,94 @@ async def handle_command(cmd: str, *, graph, saver, store, session: dict) -> boo
     return True
 
 
-# ----------------------------------------------------------------------------- entry point
-
 async def main() -> None:
-    """Wire everything together and run the REPL.
+    """Wire the application: model → MCP tools → SQLite resources → graph → input loop.
+    Async context managers close resources cleanly. Each user has their own ledger and
+    checkpoints; the shared Store still uses per-user namespaces. Resume with the same user.
 
-    📘 LEARN — startup order matters:
-        1. load MCP tools  (spawns server subprocesses, reads their tool lists)
-        2. open SQLite checkpointer + store (async context managers → closed cleanly)
-        3. build_graph(model, tools, checkpointer, store) → compiled graph
-        4. loop: read input → run_turn(...)
+    连接应用：模型 → MCP 工具 → SQLite 资源 → 图 → 输入循环。
+    异步上下文管理器负责关闭资源。每个用户拥有独立账本与检查点；
+    共享 Store 仍按用户命名空间隔离。恢复时需要使用相同用户。
     """
-    parser = argparse.ArgumentParser(description="Atlas — LangGraph agent console")
-    parser.add_argument("--user", default="default", help="user id for long-term memory")
-    parser.add_argument("--thread", default=None, help="resume an existing thread id")
+    parser = argparse.ArgumentParser(
+        description="Ledger — USD expense agent / 美元记账助手"
+    )
+    parser.add_argument(
+        "--user",
+        default="default",
+        help="User ID for ledger, checkpoints and memory / 账本、检查点和记忆的用户 ID",
+    )
+    parser.add_argument(
+        "--thread",
+        default=None,
+        help="Resume a thread under the same user / 恢复同一用户的会话",
+    )
     args = parser.parse_args()
 
     model = get_chat_model()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    settings.workspace_dir.mkdir(parents=True, exist_ok=True)
+    user_dir = user_data_dir(args.user)
+    user_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"{BOLD}Atlas{RESET} · LangGraph ReAct agent · model={settings.model}")
+    print(
+        f"{BOLD}Ledger{RESET} · USD expense agent / 美元记账助手 · model={settings.model}"
+    )
 
-    mcp_tools, report = await load_mcp_tools()
+    mcp_tools, report = await load_mcp_tools(user_id=args.user)
     for server, names in report.items():
         print(f"{DIM}  MCP '{server}': {', '.join(names)}{RESET}")
     tools = [*LOCAL_TOOLS, *mcp_tools]
 
-    # 📘 LEARN — Store: memories are persisted as key-value records, scoped by user.
-    # memory.py ranks recalled records by keyword overlap with the current query.
-
     async with (
-        AsyncSqliteSaver.from_conn_string(str(settings.data_dir / "checkpoints.sqlite")) as saver,
-        AsyncSqliteStore.from_conn_string(str(settings.data_dir / "store.sqlite")) as store,
+        AsyncSqliteSaver.from_conn_string(
+            str(user_dir / "checkpoints.sqlite")
+        ) as saver,
+        AsyncSqliteStore.from_conn_string(
+            str(settings.data_dir / "store.sqlite")
+        ) as store,
     ):
-        # 📘 LEARN — two databases, two lifetimes:
-        #   checkpoints.sqlite : every state snapshot of every thread (short-term memory)
-        #   store.sqlite       : long-term memories, independent of threads
-        await store.setup()  # creates tables on first run (the saver does this lazily)
+        await store.setup()
         graph = build_graph(model, tools, checkpointer=saver, store=store)
         session = {
             "thread_id": args.thread or uuid.uuid4().hex[:8],
             "ctx": AgentContext(user_id=args.user),
             "tools": tools,
         }
-        print(f"{DIM}  thread={session['thread_id']} user={args.user} · /help for commands{RESET}\n")
+        print(
+            f"{DIM}  thread={session['thread_id']} user={args.user} · /help for commands{RESET}\n"
+        )
 
         while True:
-            try:
-                text = await ask(f"{BOLD}you>{RESET} ")
-            except (EOFError, KeyboardInterrupt):
-                break
-            if not text:
-                continue
-            if text.startswith("/"):
-                if not await handle_command(text, graph=graph, saver=saver, store=store, session=session):
-                    break
-                continue
-            # 📘 LEARN — config vs context:
-            #   config["configurable"]["thread_id"] → which conversation (checkpoint key)
-            #   config["recursion_limit"]           → loop engineering layer 5 (hard fuse)
-            #   context=AgentContext(user_id)       → who the run is for (not persisted)
             config = {
                 "configurable": {"thread_id": session["thread_id"]},
                 "recursion_limit": settings.recursion_limit,
             }
             try:
-                await run_turn(graph, {"messages": [HumanMessage(text)]}, config, session["ctx"])
+                await resume_pending(graph, config, session["ctx"])
+                text = await ask(f"{BOLD}you>{RESET} ")
+            except (EOFError, KeyboardInterrupt):
+                break
+            except Exception as exc:
+                print(
+                    f"{RED}Resume failed; the pause is preserved. Restart with the same --user and --thread after fixing the error.\n恢复失败，暂停保留；修复后请使用相同 --user 和 --thread 重启：{exc}{RESET}"
+                )
+                break
+            if not text:
+                continue
+            if text.startswith("/"):
+                if not await handle_command(
+                    text, graph=graph, saver=saver, store=store, session=session
+                ):
+                    break
+                continue
+
+            try:
+                await run_turn(
+                    graph, {"messages": [HumanMessage(text)]}, config, session["ctx"]
+                )
             except KeyboardInterrupt:
                 print(f"\n{YELLOW}(turn interrupted){RESET}")
-            except Exception as exc:  # noqa: BLE001 - keep the REPL alive
+            except Exception as exc:
                 print(f"{RED}Error: {type(exc).__name__}: {exc}{RESET}")
     print("bye")
 

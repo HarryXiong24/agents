@@ -1,60 +1,20 @@
-"""The agent graph: a hand-built ReAct loop with loop engineering, HITL and memory.
+"""A hand-wired ReAct graph with explicit engineering seams.
+START → prepare_turn → compact_context → agent → tools → loop_guard → compact_context.
+Risky calls visit approval_gate before tools; tool-based final answers visit reflect.
+📘 LEARN: nodes return partial state updates; reducers merge them. Conditional edges
+choose the next node. A super-step is a round of execution, checkpointed by LangGraph.
+The hand-built graph makes approval, compaction, budgets and reflection inspectable.
 
-★ This is the most important file in the repo. Read it top to bottom. ★
-
-Comment conventions used throughout the codebase:
-    📘 LEARN    — the concept behind the code (what / why)
-    ⚠ PITFALL  — a mistake that is easy to make here
-    🔁 FLOW     — where execution goes next
-    🧪 TRY      — a small experiment you can run to see the behaviour yourself
-
-                    ┌──────────────┐
-         START ───▶ │ prepare_turn │  reset per-turn counters, recall long-term memory
-                    └──────┬───────┘
-                           ▼
-                  ┌─────────────────┐
-           ┌────▶ │ compact_context │  summarise old messages if over token budget
-           │      └────────┬────────┘
-           │               ▼
-           │          ┌─────────┐   no tool calls   ┌─────────┐  pass   ┌─────┐
-           │          │  agent  │ ────────────────▶ │ reflect │ ──────▶ │ END │
-           │          └────┬────┘                   └────┬────┘         └─────┘
-           │   tool calls  │  ▲                revise    │
-           │   ┌───────────┤  └──────────────────────────┘
-           │   │ risky?    │ safe
-           │   ▼           │
-           │ ┌───────────────┐  interrupt() → human approves / edits / rejects
-           │ │ approval_gate │
-           │ └──────┬────────┘
-           │        ▼      ▼
-           │      ┌─────────┐   local tools + MCP tools (rejected calls short-circuited)
-           │      │  tools  │
-           │      └────┬────┘
-           │           ▼
-           │    ┌────────────┐   detect repeated calls / error streaks
-           └─── │ loop_guard │
-                └────────────┘
-
-📘 LEARN — LangGraph in 60 seconds
-    A LangGraph program is a *state machine*:
-      • State  : a dict (here `AgentState`) shared by all nodes.
-      • Node   : a function `state -> partial update`. It never mutates state in place;
-                 it RETURNS the keys it wants to change. LangGraph merges the update
-                 using each key's *reducer* (see state.py).
-      • Edge   : "after node A, run node B". A *conditional* edge calls a routing
-                 function that looks at state and returns the next node's name.
-      • Super-step : one round of running node(s). After EVERY super-step the
-                 checkpointer saves a snapshot of the state. That is what makes
-                 pause/resume (HITL), multi-turn memory and time-travel possible.
-
-📘 LEARN — Why build the graph by hand instead of `create_react_agent(...)`?
-    `create_react_agent` gives you exactly two nodes: agent ⇄ tools. Production agents
-    need more: approval steps, loop limits, context compaction, self-checks. Writing
-    the graph yourself turns each of these into a visible node you can test in isolation.
+显式编排的 ReAct 图，把工程机制拆成可观察的节点。
+START → prepare_turn → compact_context → agent → tools → loop_guard → compact_context。
+有副作用的调用先经过 approval_gate；使用过工具的最终回答进入 reflect。
+📘 LEARN：节点返回局部状态更新，由 reducer 合并；条件边选择下一个节点。
+super-step 是一轮执行，LangGraph 会保存检查点。手写图便于观察审批、压缩、预算和反思。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections import Counter
@@ -62,12 +22,12 @@ from typing import Literal
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
-    AIMessage,       # what the model says; may contain `.tool_calls`
+    AIMessage,
     AnyMessage,
-    HumanMessage,    # what the user says
-    RemoveMessage,   # special marker: "delete the message with this id from state"
-    SystemMessage,   # instructions; we rebuild it every step and never store it in state
-    ToolMessage,     # the result of one tool call; linked by `tool_call_id`
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
 )
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.tools import BaseTool
@@ -82,23 +42,16 @@ from .config import settings
 from .prompts import CRITIC_PROMPT, SUMMARIZE_PROMPT, build_system_prompt
 from .state import AgentContext, AgentState
 
-# A fixed prefix lets other parts of the code recognise "this ToolMessage is a human
-# rejection, not a real tool failure" (loop_guard must not count rejections as errors).
+
 REJECT_PREFIX = "REJECTED by human"
 
 
-# =========================================================================== helpers
-# Small pure functions. No LangGraph magic here — just message-list manipulation.
-
 def _current_turn(messages: list[AnyMessage]) -> list[AnyMessage]:
-    """Messages since (and including) the latest HumanMessage.
+    """Return messages since the latest HumanMessage.
+    Loop detection, reflection and tool-use checks are scoped to this turn, not all history.
 
-    📘 LEARN: The thread's message list holds the WHOLE conversation. Most per-turn logic
-    (loop detection, "did we use tools this turn?", the critic's view) must only look at
-    the current turn, otherwise a repeated call from yesterday would trigger today's guard.
-
-        [Human, AI, Human, AI(tool_calls), Tool, Tool, AI]
-                       ^^^^^ current turn starts here
+    返回最后一条 HumanMessage 开始的消息。
+    循环检测、反思和是否使用工具的判断只检查当前轮，避免把历史调用算进来。
     """
     for i in range(len(messages) - 1, -1, -1):
         if isinstance(messages[i], HumanMessage):
@@ -107,21 +60,25 @@ def _current_turn(messages: list[AnyMessage]) -> list[AnyMessage]:
 
 
 def _text(msg: AnyMessage) -> str:
-    """Get a message's text whether `content` is a plain string or a list of blocks.
+    """Normalize a message’s string or content-block list to plain text.
+    MCP commonly returns blocks; never assume content is already a string.
 
-    📘 LEARN: LangChain message content can be `str` OR `list[dict]` ("content blocks",
-    e.g. [{"type": "text", "text": "..."}, {"type": "image_url", ...}]). MCP tools return
-    the block form. Always normalise before doing string operations.
+    将字符串或内容块列表统一为纯文本。
+    MCP 常返回内容块，不能假设 content 一定是字符串。
     """
     c = msg.content
-    if isinstance(c, list):  # multimodal / block content
+    if isinstance(c, list):
         c = "\n".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in c)
     return str(c)
 
 
 def _render(messages: list[AnyMessage], limit: int = 600) -> str:
-    """Turn messages into a compact plain-text transcript for a *secondary* LLM call
-    (the summariser and the critic). Each line is truncated to keep that call cheap."""
+    """Render a bounded transcript for secondary summary/critic calls.
+    Long fields are clipped, so this log is not a full-fidelity database audit.
+
+    为摘要和反思模型生成有长度上限的记录。
+    长字段会被截断，因此该日志不是完整的数据库审计记录。
+    """
     lines = []
     for m in messages:
         if isinstance(m, HumanMessage):
@@ -137,11 +94,11 @@ def _render(messages: list[AnyMessage], limit: int = 600) -> str:
 
 
 def _parse_json(text: str) -> dict:
-    """Extract the first {...} object from model output.
+    """Extract JSON from model prose/code fences; malformed JSON returns an empty result.
+    The critic fails open on parse errors: a quality check, never an authorization check.
 
-    ⚠ PITFALL: Small local models often wrap JSON in prose or ```json fences, or emit
-    slightly broken JSON. Never `json.loads(response)` directly; extract and fail soft.
-    On failure we return {} and the caller treats it as "pass" (the safe default).
+    从模型说明文字或代码块中提取 JSON；格式错误时返回空结果。
+    反思解析失败时放行：它是质量检查，不能充当授权检查。
     """
     match = re.search(r"\{.*\}", text, re.S)
     if not match:
@@ -152,36 +109,36 @@ def _parse_json(text: str) -> dict:
         return {}
 
 
-MAX_TOOL_OUTPUT = 4000  # characters; roughly 1k tokens
+MAX_TOOL_OUTPUT = 4000
 
 
 def _handle_tool_error(error: Exception) -> str:
-    """Keep graph control flow separate from recoverable tool failures."""
-    # ToolNode's wrapper error handler can also catch interrupts from execute().
-    # They must reach the graph runner so it checkpoints and waits for a resume.
+    """Turn recoverable tool failures into observations while propagating GraphBubbleUp.
+    ⚠ PITFALL: swallowing GraphInterrupt would break checkpointed ask_human/resume.
+
+    将可恢复的工具错误转为观察结果，同时继续抛出 GraphBubbleUp。
+    ⚠ PITFALL：吞掉 GraphInterrupt 会破坏 ask_human 的暂停和恢复。
+    """
     if isinstance(error, GraphBubbleUp):
         raise error
     return f"Error: {error!r}\n Please fix your mistakes."
 
 
 def _normalize_tool_result(result):
-    """Flatten MCP content blocks to plain text and cap the size.
+    """Flatten MCP blocks and cap output at one common interception point.
+    Use pagination/aggregation at the source; truncation is only a final guard.
 
-    📘 LEARN — context hygiene: a single `read_file` on a big log could dump 100k chars
-    into the conversation and push everything else out of the model's context window.
-    Capping every tool result at one choke point is the cheapest protection there is.
+    在统一拦截点将 MCP 内容块转为文本并限制输出长度。
+    应优先在数据源分页或汇总，截断只是最后一道保护。
     """
     if isinstance(result, ToolMessage):
         text = _text(result)
         if len(text) > MAX_TOOL_OUTPUT:
             text = text[:MAX_TOOL_OUTPUT] + f"\n... [truncated {len(text) - MAX_TOOL_OUTPUT} chars]"
         if text != result.content:
-            # Messages are pydantic models: copy-with-changes instead of mutating.
             result = result.model_copy(update={"content": text})
     return result
 
-
-# =========================================================================== graph factory
 
 def build_graph(
     model: BaseChatModel,
@@ -191,39 +148,30 @@ def build_graph(
     store=None,
     critic_model: BaseChatModel | None = None,
 ):
-    """Assemble and compile the agent graph.
+    """Inject the model, tools, checkpointer, Store and optional critic model.
+    📘 LEARN: closures capture these dependencies. Tests replace them with scripted models
+    and in-memory storage while exercising the same production graph.
 
-    📘 LEARN — dependency injection: the model, tools, checkpointer and store are all
-    passed in. That is why tests can swap the Groq model for a scripted fake model and SQLite for
-    in-memory storage while exercising exactly the same graph.
-
-    Nodes are defined as *closures* inside this function so they can use `model`,
-    `tools`, etc. without globals.
+    注入模型、工具、Checkpointer、Store 和可选的反思模型。
+    📘 LEARN：内部函数通过闭包访问这些依赖。测试替换为脚本模型和内存存储，
+    但执行的仍是同一张实际运行的图。
     """
     critic_model = critic_model or model
 
-    # 📘 LEARN — bind_tools: converts each tool's Python signature + docstring into a
-    # JSON-Schema "function" definition and attaches it to every request. The model then
-    # replies either with text or with structured `tool_calls`. This is function calling;
-    # ReAct on top of it is just "loop until there are no more tool_calls".
-    # 🧪 TRY: print(tools[0].tool_call_schema.model_json_schema()) to see what the model sees.
+    # 📘 LEARN: bind_tools adds function schemas to each request; AIMessage carries structured calls.
+    # 📘 LEARN：bind_tools 把函数 schema 加入每次请求，AIMessage 携带结构化工具调用。
     model_with_tools = model.bind_tools(tools)
 
-    # ------------------------------------------------------------------ node: prepare_turn
     async def prepare_turn(state: AgentState, runtime: Runtime[AgentContext]):
-        """Start of a user turn: reset loop counters and recall relevant long-term memory.
+        """Reset per-turn budgets/decisions and recall user memories via injected Runtime.
+        Recall enters the system prompt, not the message history. Context must be passed on resume.
 
-        📘 LEARN — Runtime injection: if a node declares a parameter typed `Runtime[...]`,
-        LangGraph passes in the per-run `context` (here: user_id) and the `store`.
-        Context is static input for this run; it is NOT saved in the checkpoint.
-
-        📘 LEARN — why reset here? State is persisted across turns. Without a reset, the
-        iteration counter from the previous question would eat into this one's budget.
+        通过注入的 Runtime 召回用户记忆，重置本轮预算与审批决策。
+        召回结果进入系统提示词，不加入消息历史；恢复时仍需传入 Context。
         """
         turn = _current_turn(state["messages"])
         query = _text(turn[0]) if turn else ""
-        # Long-term memory READ path: fetch facts relevant to the new user message.
-        # They are not added as messages; build_system_prompt() puts them in the prompt.
+
         memories = await memory.recall(runtime.store, runtime.context.user_id, query)
         return {
             "iterations": 0,
@@ -233,70 +181,47 @@ def build_graph(
             "hitl_decisions": {},
             "memories": memories,
         }
-        # 🔁 FLOW: fixed edge → compact_context
 
-    # ------------------------------------------------------------------ node: compact_context
     async def compact_context(state: AgentState):
-        """Short-term memory management: fold old messages into a rolling summary.
+        """Summarize old turns when the approximate token budget is exceeded.
+        📘 LEARN: merge the previous summary with old messages, then RemoveMessage those messages.
+        Keep recent turns verbatim. Move the cut to a HumanMessage boundary so AI tool calls
+        and their ToolMessages stay together. Return {} when compaction is unnecessary.
+        Trimming, summarizing and retrieving history are distinct context-management strategies.
 
-        📘 LEARN — the problem: a thread's message list grows forever, but the model has a
-        finite context window, and quality drops long before the window is full
-        ("context rot"). Three common strategies:
-            1. Trim     — drop old messages. Cheap, but forgets.
-            2. Summarise — replace old messages with an LLM-written summary.  ← we do this
-            3. Retrieve  — store everything, fetch only relevant pieces (RAG over history).
-
-        How it works:
-            messages: [H1 A1 H2 A2(tc) T T A2' H3 A3 H4]      budget exceeded
-                       └──── old ─────────────┘ └─ keep ─┘
-            → summary  = LLM("existing summary" + old)
-            → messages = [RemoveMessage(id) for each old]   (deleted via the reducer)
-
-        Runs before EVERY agent step (also mid-turn), but returns {} (no-op) when under
-        budget, so it costs nothing most of the time.
+        估算的 token 数超过预算时压缩旧轮次。
+        📘 LEARN：旧摘要与旧消息一起生成新摘要，再用 RemoveMessage 删除旧消息。
+        近期轮次保留原文；截断点回退到 HumanMessage，保证工具调用与结果成对保留。
+        无需压缩时返回 {}。直接裁剪、摘要压缩和历史检索是不同的上下文管理策略。
         """
         msgs = state["messages"]
         if (
             len(msgs) <= settings.keep_recent_messages
             or count_tokens_approximately(msgs) <= settings.context_token_budget
         ):
-            return {}  # 📘 Returning {} means "no change". Every node may do this.
+            return {}
 
         cut = len(msgs) - settings.keep_recent_messages
-        # ⚠ PITFALL: Never split an AIMessage(tool_calls) from its ToolMessages. A
-        # ToolMessage whose tool call was deleted is an invalid conversation for most chat
-        # APIs. Moving the cut back to a HumanMessage boundary guarantees whole turns.
+
         while cut > 0 and not isinstance(msgs[cut], HumanMessage):
             cut -= 1
         if cut <= 0:
-            return {}  # the current turn alone is big; tool-output capping handles that
+            return {}
         old = msgs[:cut]
 
-        # "Rolling" summary: the previous summary is fed back in, so information compacted
-        # three times ago is not lost — it is re-summarised together with the new part.
         prompt = SUMMARIZE_PROMPT.format(summary=state.get("summary", ""), transcript=_render(old))
         summary = _text(await model.ainvoke([HumanMessage(prompt)])).strip()
 
-        # 📘 LEARN — RemoveMessage: the `messages` key uses the `add_messages` reducer, which
-        # appends new messages, REPLACES messages with an existing id, and DELETES messages
-        # for which it receives RemoveMessage(id=...). You cannot just return a shorter
-        # list: that would be interpreted as "append these".
         return {"summary": summary, "messages": [RemoveMessage(id=m.id) for m in old]}
-        # 🔁 FLOW: fixed edge → agent
 
-    # ------------------------------------------------------------------ node: agent
     async def agent(state: AgentState):
-        """The "Reason" half of ReAct: one LLM call that decides the next action.
+        """Build a fresh system prompt and run one reasoning step.
+        The last allowed step uses the model without bound tools, requesting a final answer.
+        This is graceful budget exhaustion; recursion_limit is the harder fallback.
 
-        📘 LEARN — dynamic system prompt (context engineering): the system prompt is NOT
-        stored in state. It is rebuilt from state on every step, so it always contains the
-        latest summary, memories, loop warnings, critique and remaining budget. The model
-        sees a curated view instead of a raw transcript.
-
-        📘 LEARN — loop engineering layer 2, the forced final answer: on the last allowed
-        step we call the model WITHOUT tools. A model that has no tools bound cannot emit
-        tool calls, so the loop is guaranteed to end with a real answer instead of an
-        exception. Compare with relying only on recursion_limit, which just crashes.
+        构建最新系统提示词，执行一步决策。
+        最后一个允许的步骤不绑定工具，要求模型给出最终回答。
+        这是预算耗尽时的温和退出；recursion_limit 则是更硬的后备限制。
         """
         iterations = state.get("iterations", 0) + 1
         tools_enabled = iterations < settings.max_iterations
@@ -307,22 +232,17 @@ def build_graph(
         )
         llm = model_with_tools if tools_enabled else model
         response = await llm.ainvoke([SystemMessage(system), *state["messages"]])
-        # Only the AI response is appended to state; the SystemMessage is ephemeral.
+
         return {"messages": [response], "iterations": iterations}
-        # 🔁 FLOW: conditional edge → route_after_agent decides
 
-    # ------------------------------------------------------------------ router after agent
     def route_after_agent(state: AgentState) -> Literal["approval_gate", "tools", "reflect", "__end__"]:
-        """The ReAct decision point, expressed as a conditional edge.
+        """Route tool calls to approval/tools, or an answer to reflection/END.
+        Routers only return node names; they do not update state. Literal helps graph rendering.
+        Reflection runs only after tool use, with revision budget and an agent step remaining.
 
-        📘 LEARN: A router is a plain function that returns the NAME of the next node.
-        It must not change state (it has no way to return updates).
-
-            tool_calls & any risky  → approval_gate   (human must approve first)
-            tool_calls & all safe   → tools           (act)
-            no tool_calls           → reflect / END   (the model thinks it is done)
-
-        The `Literal[...]` return annotation lets LangGraph draw the graph correctly.
+        将工具调用路由到审批或执行，将回答路由到反思或结束。
+        路由函数只返回节点名，不更新状态；Literal 帮助绘制图。
+        只有本轮使用过工具、反思预算未耗尽、且仍有 Agent 步数时才执行反思。
         """
         last = state["messages"][-1]
         if isinstance(last, AIMessage) and last.tool_calls:
@@ -330,89 +250,86 @@ def build_graph(
                 return "approval_gate"
             return "tools"
 
-        # Reflection costs an extra LLM call, so only spend it when the answer is built on
-        # tool results (where fabrication / misreading is most likely). Pure chit-chat skips it.
         turn = _current_turn(state["messages"])
         used_tools = any(isinstance(m, ToolMessage) for m in turn)
         if (
             settings.enable_reflection
             and used_tools
             and state.get("reflections", 0) < settings.max_reflections
+            and state.get("iterations", 0) < settings.max_iterations
         ):
             return "reflect"
         return END
 
-    # ------------------------------------------------------------------ node: approval_gate (HITL)
     def approval_gate(state: AgentState):
-        """Pause before risky tool calls. The human approves, edits the args, or rejects.
+        """Pause before mutations and apply approve/edit/reject decisions.
+        📘 LEARN: interrupt checkpoints and returns control to the caller. Command(resume=...)
+        on the SAME thread re-runs this node from the top; interrupt then returns the answer.
+        ⚠ PITFALL: everything before interrupt must be free of side effects.
+        Edits replace the AIMessage by ID. Rejections keep the call and receive a ToolMessage.
+        Missing/malformed decisions reject writes; safe calls in the same batch still run.
 
-        📘 LEARN — how interrupt() works, step by step:
-          1. First run: `interrupt(payload)` raises a special exception. LangGraph catches
-             it, saves a checkpoint (state + "we were inside approval_gate"), and returns
-             control to the caller. `payload` is exposed as `snapshot.interrupts[0].value`.
-          2. The caller (main.py) shows the payload to the human and collects a decision.
-          3. The caller runs `graph.astream(Command(resume=decision), same thread_id)`.
-          4. LangGraph loads the checkpoint and RE-RUNS THIS NODE FROM THE TOP. This time
-             `interrupt()` does not pause — it returns `decision`.
-
-        ⚠ PITFALL: because of step 4, any code BEFORE interrupt() runs twice. Keep it
-        side-effect free (no API calls, no file writes, no DB inserts). Here we only read
-        state, so re-running is harmless.
-
-        📘 LEARN — durability: the pause is just a saved checkpoint. With the SQLite
-        checkpointer you can quit the program, restart with `--thread <id>`, and the
-        approval request is still pending. Nothing is blocked in memory.
+        写入前暂停，应用批准、编辑或拒绝决策。
+        📘 LEARN：interrupt 保存检查点并把控制权交给调用方。同一个 thread 上的
+        Command(resume=...) 会从节点开头重新执行，此时 interrupt 返回用户的回答。
+        ⚠ PITFALL：interrupt 之前不能产生副作用。
+        编辑通过相同 ID 替换 AIMessage；拒绝仍保留工具调用，并生成对应 ToolMessage。
+        缺失或错误的决策会拒绝写入；同批次的安全调用仍可执行。
         """
         last: AIMessage = state["messages"][-1]
         risky = [tc for tc in last.tool_calls if tc["name"] in settings.risky_tools]
 
-        response = interrupt(  # ← execution pauses here on the first run
+        response = interrupt(
             {
                 "type": "approval",
                 "calls": [{"id": tc["id"], "name": tc["name"], "args": tc["args"]} for tc in risky],
             }
         )
-        # Below this line only runs after resume. Expected shape:
-        #   {"decisions": {tool_call_id: {"action": "approve" | "edit" | "reject", ...}}}
-        decisions: dict = (response or {}).get("decisions", {})
+
+        decisions = response.get("decisions", {}) if isinstance(response, dict) else {}
+        if not isinstance(decisions, dict):
+            decisions = {}
 
         new_calls, hitl = [], {}
         for tc in last.tool_calls:
-            d = decisions.get(tc["id"], {"action": "approve"})  # safe tools: auto-approve
+            d = decisions.get(tc["id"], {}) if tc["name"] in settings.risky_tools else {"action": "approve"}
+            if not isinstance(d, dict) or d.get("action") not in ("approve", "edit", "reject"):
+                d = {"action": "reject", "reason": "缺少有效的人工审批决策"}
+            if d.get("action") == "edit" and not isinstance(d.get("args"), dict):
+                d = {"action": "reject", "reason": "修改后的参数必须是 JSON 对象"}
             if d.get("action") == "edit":
                 tc = {**tc, "args": d.get("args", tc["args"])}
             elif d.get("action") == "reject":
-                # We do NOT delete the call. We record the rejection; the tools node turns it
-                # into a ToolMessage so the history stays valid and the model learns why.
                 hitl[tc["id"]] = {"action": "reject", "reason": d.get("reason", "")}
             new_calls.append(tc)
 
-        # 📘 LEARN — replace-by-id: `updated` keeps the original message id, so the
-        # add_messages reducer REPLACES the old AIMessage instead of appending a new one.
-        # Result: the history records the args that actually ran (honest audit trail).
         updated = last.model_copy(update={"tool_calls": new_calls})
         return {"messages": [updated], "hitl_decisions": hitl}
-        # 🔁 FLOW: fixed edge → tools
 
-    # ------------------------------------------------------------------ node: tools
     async def enforce_hitl(request, execute):
-        """Tool-call interceptor (middleware around every single tool execution).
+        """Intercept every tool call: reject without execution, apply a timeout, normalize output.
+        📘 LEARN: wrappers may inspect a call, execute it, post-process it or short-circuit it.
+        Every call must receive a matching ToolMessage, including human rejection.
+        A timeout does not prove a remote write was rolled back; inspect the ledger before retrying.
 
-        📘 LEARN — interceptor pattern: ToolNode calls `awrap_tool_call(request, execute)`
-        for each tool call. You may inspect/modify `request`, call `execute(request)` to
-        really run the tool, post-process the result, or skip execution entirely and
-        return your own ToolMessage. It is the place for cross-cutting concerns:
-        permissions, rate limits, caching, logging, output sanitising.
-
-        Here it does two things:
-          • rejected calls → return a "REJECTED" ToolMessage without running the tool
-          • executed calls → normalise/cap the output
+        拦截每个工具调用：拒绝时不执行、设置超时、统一输出格式。
+        📘 LEARN：包装器可以检查调用、执行、后处理，也可以直接返回结果。
+        每次调用都必须有匹配的 ToolMessage，包括被人工拒绝的调用。
+        超时不代表远程写入已回滚；重试前应查询账本确认结果。
         """
+        # ToolNode shares one interrupt context across its parallel calls. Ask one combined question.
+        # ToolNode 的并行调用共享中断上下文，因此应合并为一次提问。
+        calls = request.state["messages"][-1].tool_calls
+        if request.tool_call["name"] == "ask_human" and len(calls) > 1:
+            return ToolMessage(
+                content="Call ask_human alone, combining all necessary questions into one question.\n"
+                "请单独调用 ask_human，把必要问题合并为一次提问。",
+                tool_call_id=request.tool_call["id"],
+                name="ask_human",
+                status="error",
+            )
         decision = (request.state.get("hitl_decisions") or {}).get(request.tool_call["id"])
         if decision and decision["action"] == "reject":
-            # ⚠ PITFALL: every tool_call in an AIMessage MUST be answered by a ToolMessage
-            # with the matching tool_call_id. Skipping it leaves a dangling call and many
-            # model APIs will reject the next request.
             return ToolMessage(
                 content=f"{REJECT_PREFIX}. Reason: {decision['reason'] or 'not given'}. "
                 "Do not retry this exact call; adapt or ask the user.",
@@ -420,42 +337,30 @@ def build_graph(
                 name=request.tool_call["name"],
                 status="error",
             )
-        result = await execute(request)
+        result = await asyncio.wait_for(execute(request), timeout=settings.tool_timeout_seconds)
         return _normalize_tool_result(result)
 
-    # 📘 LEARN — ToolNode is the "Act / Observe" half of ReAct. It reads the tool_calls on
-    # the last AIMessage, runs them (in parallel when there are several), and appends one
-    # ToolMessage per call.
-    #
-    # 📘 LEARN — loop engineering layer 3, error-as-observation: with
-    # _handle_tool_error an exception (bad path, invalid args, timeout...) becomes a
-    # ToolMessage(status="error", content="Error: ..."). The model reads the error and can
-    # fix its own mistake on the next step, instead of the whole run crashing.
-    # Our handler re-raises GraphBubbleUp (including GraphInterrupt), even when the
-    # tool-call wrapper catches it, so ask_human pauses and resumes correctly.
+    # 📘 LEARN: independent calls in one AIMessage run in parallel, each producing a ToolMessage.
+    # Dependencies need separate steps: summarize first, then calculate a share from that result.
+    # 📘 LEARN：同一 AIMessage 中的独立调用可并行，每个调用产生一条 ToolMessage。
+    # 有依赖的调用需要分步：先汇总，再用汇总结果计算占比。
     tool_node = ToolNode(
         tools,
         handle_tool_errors=_handle_tool_error,
         awrap_tool_call=enforce_hitl,
     )
 
-    # ------------------------------------------------------------------ node: loop_guard
     def loop_guard(state: AgentState):
-        """Loop engineering layer 4: detect degenerate loops and steer the model.
+        """Detect identical name/argument calls and consecutive tool failures in this turn.
+        sort_keys makes argument key order irrelevant. Human rejections do not count as failures.
+        The warning steers the next prompt; it does not itself halt execution. Clear batch decisions.
 
-        📘 LEARN — two classic agent failure modes:
-          • Repetition: calling the same tool with the same args again and again, hoping
-            for a different result. Detected by counting `name(args)` signatures.
-          • Error spiral: tool fails → model retries blindly → fails again ...
-            Detected by counting consecutive error ToolMessages at the end of the turn.
-
-        We do not stop the graph here. We write `loop_warning`, which build_system_prompt()
-        injects into the next system prompt. This is *steering*, a softer and usually more
-        useful intervention than killing the run. The hard stop is the step budget.
+        检测本轮相同名称/参数的重复调用，以及连续工具错误。
+        sort_keys 排除参数键顺序的影响；人工拒绝不计入工具故障。
+        警告注入下一次提示词引导模型，本节点本身不强制停止。执行后清理本批审批决策。
         """
         turn = _current_turn(state["messages"])
 
-        # sort_keys=True so {"a":1,"b":2} and {"b":2,"a":1} count as the same call.
         calls = Counter(
             f"{tc['name']}({json.dumps(tc['args'], sort_keys=True, ensure_ascii=False)})"
             for m in turn if isinstance(m, AIMessage) for tc in m.tool_calls
@@ -468,7 +373,6 @@ def build_graph(
 
         streak = 0
         for m in reversed([m for m in turn if isinstance(m, ToolMessage)]):
-            # Human rejections are not tool failures; don't count them.
             if m.status == "error" and not _text(m).startswith(REJECT_PREFIX):
                 streak += 1
             else:
@@ -479,29 +383,18 @@ def build_graph(
                 "error messages, check argument formats, or explain the problem to the user."
             )
 
-        # Clear hitl_decisions: they applied only to the tool batch that just ran.
         return {"loop_warning": "\n".join(warnings), "hitl_decisions": {}}
-        # 🔁 FLOW: fixed edge → compact_context → agent  (this closes the ReAct loop)
 
-    # ------------------------------------------------------------------ node: reflect
     async def reflect(state: AgentState) -> Command[Literal["agent", "__end__"]]:
-        """Self-critique loop (also called Reflexion / evaluator-optimizer).
+        """Review the draft against this turn’s request and tool log.
+        📘 LEARN: Command combines a state update with routing. On revise, remove the draft
+        and place it with feedback in the next system prompt. Bound this outer loop separately.
+        Reflection checks answers; it cannot roll back ledger writes or replace human approval.
 
-        📘 LEARN: A second LLM call reviews the draft answer against the tool log. It is
-        an OUTER loop around the ReAct loop:
-            agent → ... → draft → critic says "revise" → agent (with feedback) → new draft
-
-        Capped by max_reflections so the critic itself cannot cause an infinite loop.
-
-        📘 LEARN — Command(goto=..., update=...): a node can both update state AND choose
-        the next node, instead of using a separate router. Useful when the routing
-        decision is a by-product of the node's own work (here: the critic's verdict).
-        Declare possible targets with `destinations=` in add_node so the graph draws right.
-
-        📘 LEARN — why remove the draft? If we kept it and appended feedback, the model
-        would see its own wrong answer as a finished turn and tend to repeat it. Removing it
-        and quoting it in the system prompt ("here was your draft, here is the feedback")
-        frames the next step as a rewrite.
+        对照本轮请求和工具日志审核回答草稿。
+        📘 LEARN：Command 同时更新状态并决定路由。需要修改时删除旧草稿，
+        把草稿和反馈加入下次系统提示词。这个外层循环有独立的次数上限。
+        反思检查回答，不能撤销账本写入，也不能替代人工审批。
         """
         msgs = state["messages"]
         draft: AIMessage = msgs[-1]
@@ -523,35 +416,28 @@ def build_graph(
                     "messages": [RemoveMessage(id=draft.id)],
                 },
             )
-        # Unparseable verdict → treated as pass. Failing open is right for a quality check;
-        # it would be wrong for a safety check (that's what approval_gate is for).
+
         return Command(goto=END, update={"reflections": reflections, "critique": None})
 
-    # ================================================================== wiring
-    # 📘 LEARN: context_schema declares the type of the per-run `context` object, which
-    # nodes receive via `Runtime` and tools via `ToolRuntime`.
+    # 📘 LEARN: context_schema enables Runtime/ToolRuntime injection. destinations documents Command routes.
+    # 📘 LEARN：context_schema 启用 Runtime/ToolRuntime 注入；destinations 声明 Command 的可能路由。
     g = StateGraph(AgentState, context_schema=AgentContext)
 
     g.add_node("prepare_turn", prepare_turn)
     g.add_node("compact_context", compact_context)
     g.add_node("agent", agent)
     g.add_node("approval_gate", approval_gate)
-    g.add_node("tools", tool_node)            # a ToolNode is itself a valid node
+    g.add_node("tools", tool_node)
     g.add_node("loop_guard", loop_guard)
-    g.add_node("reflect", reflect, destinations=("agent", END))  # routes via Command
+    g.add_node("reflect", reflect, destinations=("agent", END))
 
     g.add_edge(START, "prepare_turn")
     g.add_edge("prepare_turn", "compact_context")
     g.add_edge("compact_context", "agent")
-    # The 3rd argument lists every possible target (used for validation and drawing).
+
     g.add_conditional_edges("agent", route_after_agent, ["approval_gate", "tools", "reflect", END])
     g.add_edge("approval_gate", "tools")
     g.add_edge("tools", "loop_guard")
-    g.add_edge("loop_guard", "compact_context")   # ← the back-edge that makes it a loop
+    g.add_edge("loop_guard", "compact_context")
 
-    # 📘 LEARN — compile(): validates the graph (no dangling nodes/edges) and attaches:
-    #   • checkpointer → short-term memory, pause/resume, history (needs a thread_id)
-    #   • store        → long-term memory shared across threads
-    # Without a checkpointer, interrupt() cannot work: there is nowhere to save the pause.
-    # 🧪 TRY: `/graph` in the console prints this graph as Mermaid.
     return g.compile(checkpointer=checkpointer, store=store)

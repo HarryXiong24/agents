@@ -1,37 +1,23 @@
-"""Memory management.
+"""Three layers of memory.
+1. Short-term: thread messages/checkpoints in SQLite.
+2. Compaction: old messages become a rolling summary.
+3. Long-term: user facts in Store, independent of thread IDs.
+Store records have namespace=("memories", user_id), a unique key, and a JSON value.
+📘 LEARN: starting a new thread changes conversation history, not user preferences.
 
-📘 LEARN — an agent's "memory" is really three different mechanisms:
-
-  1. Short-term  — the message list of ONE thread (conversation).
-                   Persisted by the checkpointer (SQLite) after every super-step,
-                   keyed by thread_id. Gone from view when you start a new thread.
-                   → configured in main.py (AsyncSqliteSaver)
-
-  2. Compaction  — when that thread grows past a token budget, old messages are
-                   summarised into `state.summary` and deleted.
-                   → graph.py: compact_context
-
-  3. Long-term   — facts about the USER that survive across threads, stored in a
-                   LangGraph Store (key-value with keyword retrieval), namespaced
-                   by user_id. Recalled at the start of each turn; written by tools.
-                   → this file
-
-    thread A ──┐                                     ┌── thread B (days later)
-    "I prefer  │   save_memory ──▶ Store ──▶ recall  │   "how should you format
-     bullets"  │        ("memories", "harry")        │    answers for me?"
-               ┘                                     └── system prompt includes the fact
-
-📘 LEARN — the Store data model:
-    namespace : tuple path, like a folder   → ("memories", "harry")
-    key       : unique id within namespace  → "a1b2c3d4"
-    value     : a JSON dict                 → {"content": "...", "created_at": "..."}
+三层记忆。
+1. 短期：SQLite 中的会话消息和检查点。
+2. 压缩：将旧消息合并为滚动摘要。
+3. 长期：Store 中的用户偏好，不依赖会话 ID。
+Store 记录包含命名空间 ("memories", user_id)、唯一键和 JSON 值。
+📘 LEARN：新建会话只切换对话历史，不会清空用户偏好。
 """
 
 from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from langgraph.store.base import BaseStore
 
@@ -39,16 +25,17 @@ from .config import settings
 
 
 def namespace(user_id: str) -> tuple[str, ...]:
-    # Namespacing by user is the isolation boundary: user A's recall never sees user B's facts.
+    # 📘 LEARN: namespaces isolate users; user_id comes from the application, not tool arguments.
+    # 📘 LEARN：命名空间隔离用户，user_id 来自应用入口，不是工具参数。
     return ("memories", user_id)
 
 
 def _tokens(text: str) -> set[str]:
-    """Cheap tokenizer that works for English words and Chinese (char + char bigrams).
+    """Tokenize English words and Chinese characters/bigrams without extra dependencies.
+    Chinese has no spaces; adjacent character pairs give useful lexical overlap.
 
-    📘 LEARN: Chinese has no spaces, so splitting on whitespace returns whole sentences.
-    Character bigrams ("喜欢喝茶" → 喜欢, 欢喝, 喝茶) are a classic, dependency-free way
-    to get useful overlap matching for CJK text.
+    无需额外依赖，提取英文单词、中文单字和相邻双字。
+    中文没有空格，连续双字可以提供简单的词面匹配信号。
     """
     text = text.lower()
     words = set(re.findall(r"[a-z0-9_]+", text))
@@ -58,11 +45,11 @@ def _tokens(text: str) -> set[str]:
 
 
 async def save(store: BaseStore, user_id: str, content: str) -> str:
-    key = uuid.uuid4().hex[:8]  # short id so the model can reference it ("delete a1b2c3d4")
+    key = uuid.uuid4().hex[:8]
     await store.aput(
         namespace(user_id),
         key,
-        {"content": content, "created_at": datetime.now(timezone.utc).isoformat()},
+        {"content": content, "created_at": datetime.now(UTC).isoformat()},
     )
     return key
 
@@ -74,26 +61,28 @@ async def delete(store: BaseStore, user_id: str, key: str) -> bool:
     return True
 
 
-async def list_all(store: BaseStore, user_id: str, limit: int = 100) -> list[tuple[str, str]]:
-    # asearch without a query = list items in the namespace.
+async def list_all(
+    store: BaseStore, user_id: str, limit: int = 100
+) -> list[tuple[str, str]]:
     items = await store.asearch(namespace(user_id), limit=limit)
     return [(it.key, it.value["content"]) for it in items]
 
 
-async def recall(store: BaseStore | None, user_id: str, query: str, k: int | None = None) -> list[str]:
-    """Return up to k memories relevant to `query`, formatted as '[key] content'.
+async def recall(
+    store: BaseStore | None, user_id: str, query: str, k: int | None = None
+) -> list[str]:
+    """Rank stored memories by token overlap and return top-k as [id] content.
+    A few fallback memories are returned if no terms overlap. This is keyword retrieval,
+    not semantic search: synonyms may be missed. Top-k keeps the prompt bounded.
 
-    📘 LEARN — keyword retrieval: score memories by token overlap with the query.
-    Good enough for a demo and for hundreds of memories; misses synonyms.
-
-    Why recall only top-k instead of injecting ALL memories? Same reason as compaction:
-    context is a budget. 500 memories in every prompt would be slow and distracting.
+    按词项重叠排序，以 [id] 内容的格式返回 top-k 条记忆。
+    无匹配时返回少量兜底记忆。这是关键词检索，不是语义搜索，可能遗漏同义词。
+    top-k 避免把全部记忆塞进提示词。
     """
     if store is None or not query:
         return []
     k = k or settings.memory_recall_k
 
-    # Score every memory by token overlap (fine for hundreds of items).
     q = _tokens(query)
     scored = []
     for key, content in await list_all(store, user_id, limit=500):
@@ -101,6 +90,6 @@ async def recall(store: BaseStore | None, user_id: str, query: str, k: int | Non
         scored.append((overlap, key, content))
     scored.sort(reverse=True)
     hits = [s for s in scored if s[0] > 0][:k]
-    if not hits:  # nothing matched: still surface a few as general context about the user
+    if not hits:
         hits = scored[: min(3, k)]
     return [f"[{key}] {content}" for _, key, content in hits]

@@ -1,28 +1,16 @@
-"""Load tools from MCP servers declared in mcp_servers.json.
+"""Load MCP tools from configuration.
+📘 LEARN: client → initialize → tools/list → BaseTool adapter → bind_tools;
+a later model call reaches tools/call through the adapter. MCP serves tools;
+it does not replace function calling. The model sees the same schema as local tools.
+stdio launches a local subprocess; streamable_http connects to a remote server.
+SSE is a legacy transport; the configuration can describe additional servers.
 
-📘 LEARN — MCP (Model Context Protocol) in one picture:
-
-    ┌──────── this process (MCP *client*) ────────┐        ┌──── separate process ────┐
-    │ LangGraph  ──▶ BaseTool (adapter) ──▶ MCP   │ stdio  │ MCP *server*             │
-    │                                     session ├───────▶│  tools/list  → schemas   │
-    │                                             │JSON-RPC│  tools/call  → run tool  │
-    └─────────────────────────────────────────────┘        └──────────────────────────┘
-
-    1. Client spawns the server (stdio) or connects to it (HTTP).
-    2. `initialize` handshake, then `tools/list` returns each tool's name, description
-       and JSON-Schema for its inputs.
-    3. langchain-mcp-adapters wraps each one as a LangChain BaseTool whose `ainvoke`
-       sends `tools/call` to the server.
-    4. bind_tools() turns those BaseTools into function-calling schemas for the chat model.
-
-    So MCP is a *standard way to serve tools*; it sits on top of function calling, it does
-    not replace it. The model never knows a tool came from MCP.
-
-📘 LEARN — transports:
-    stdio            : client launches the server as a subprocess; messages over stdin/stdout.
-                       Best for local tools. (used here)
-    streamable_http  : server runs independently at a URL; many clients can share it.
-    sse / websocket  : older / alternative remote transports.
+从配置加载 MCP 工具。
+📘 LEARN：客户端 → initialize → tools/list → BaseTool 适配器 → bind_tools；
+随后模型的工具调用通过适配器转为 tools/call。MCP 负责提供工具，
+不替代 Function Calling，模型看到的 schema 与本地工具相同。
+stdio 启动本地子进程；streamable_http 连接远程服务。
+SSE 是较早的传输方式；配置中可以继续添加其他服务。
 """
 
 from __future__ import annotations
@@ -34,48 +22,51 @@ from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from mcp.client.stdio import get_default_environment
 
-from .config import ROOT, settings
+from .config import ROOT, settings, user_data_dir
 
 
-def _expand(value):
-    """Substitute ${PYTHON} and ${ROOT} placeholders so the JSON config is portable
-    (works in any venv and from any working directory)."""
+def _expand(value, user_id: str = "default"):
+    """Expand portable Python, app-root and trusted per-user ledger paths recursively.
+
+    递归展开 Python、应用根目录和可信的用户账本路径，使配置不依赖启动目录。
+    """
     if isinstance(value, str):
-        return value.replace("${PYTHON}", sys.executable).replace("${ROOT}", str(ROOT))
+        return (value.replace("${PYTHON}", sys.executable).replace("${ROOT}", str(ROOT))
+                .replace("${LEDGER_DB}", str(user_data_dir(user_id) / "expenses.sqlite")))
     if isinstance(value, list):
-        return [_expand(v) for v in value]
+        return [_expand(v, user_id) for v in value]
     if isinstance(value, dict):
-        return {k: _expand(v) for k, v in value.items()}
+        return {k: _expand(v, user_id) for k, v in value.items()}
     return value
 
 
-def load_connections() -> dict:
+def load_connections(user_id: str = "default") -> dict:
     if not settings.mcp_config.exists():
         return {}
-    conns = _expand(json.loads(settings.mcp_config.read_text()))
+    conns = _expand(json.loads(settings.mcp_config.read_text()), user_id)
     for conn in conns.values():
         if conn.get("transport") == "stdio":
-            # ⚠ PITFALL: when you pass `env` to an MCP stdio server, it REPLACES the whole
-            # environment — no PATH, no HOME. Commands like `npx`/`uvx` then fail with
-            # "not found". Merge with MCP's safe default environment instead.
+            # ⚠ PITFALL: an explicit stdio env replaces the inherited environment; merge safe defaults.
+            # ⚠ PITFALL：显式传入 stdio env 会替换继承环境，需要合并安全默认值。
             conn["env"] = {**get_default_environment(), **conn.get("env", {})}
     return conns
 
 
-async def load_mcp_tools() -> tuple[list[BaseTool], dict[str, list[str]]]:
-    """Return (tools, {server_name: [tool names]}). A failing server is skipped, not fatal.
+async def load_mcp_tools(*, user_id: str = "default") -> tuple[list[BaseTool], dict[str, list[str]]]:
+    """Discover each server independently; warn and skip a failed server.
+    The adapter opens a short-lived session per call, so business state must persist
+    outside the server process. user_id comes from the CLI, never from the model.
 
-    📘 LEARN: we connect to each server separately so one broken server (missing binary,
-    crash on start) doesn't take down the agent — graceful degradation. Tool calls later
-    open a short-lived session per call (the adapter's default), so no connection has to
-    be kept alive for the whole REPL session.
+    分别发现各服务的工具；启动失败时警告并跳过该服务。
+    适配器默认每次调用建立短会话，因此业务状态必须保存在服务进程之外。
+    user_id 来自命令行入口，不由模型填写。
     """
     tools: list[BaseTool] = []
     report: dict[str, list[str]] = {}
-    for name, conn in load_connections().items():
+    for name, conn in load_connections(user_id).items():
         try:
             server_tools = await MultiServerMCPClient({name: conn}).get_tools()
-        except Exception as exc:  # noqa: BLE001 - surface any startup failure
+        except Exception as exc:
             print(f"  ! MCP server '{name}' failed to start: {exc}", file=sys.stderr)
             continue
         tools.extend(server_tools)
@@ -83,7 +74,7 @@ async def load_mcp_tools() -> tuple[list[BaseTool], dict[str, list[str]]]:
     return tools, report
 
 
-if __name__ == "__main__":  # 🧪 TRY: python -m agent.mcp_client
+if __name__ == "__main__":
     import asyncio
 
     _, rep = asyncio.run(load_mcp_tools())

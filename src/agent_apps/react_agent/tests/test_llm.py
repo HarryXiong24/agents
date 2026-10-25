@@ -1,4 +1,7 @@
-"""Offline checks for Groq configuration."""
+"""Offline checks for Groq configuration.
+
+Groq 配置的离线验证。
+"""
 
 from dataclasses import replace
 
@@ -6,7 +9,7 @@ import pytest
 from langchain_groq import ChatGroq
 
 from agent_apps.react_agent.agent import llm
-from agent_apps.react_agent.agent.tools import calculator
+from agent_apps.react_agent.agent.tools import calculate_share
 
 
 def test_groq_model_supports_tool_binding(monkeypatch):
@@ -22,7 +25,7 @@ def test_groq_model_supports_tool_binding(monkeypatch):
     assert model.groq_api_base == "https://groq.example"
     assert model.groq_api_key.get_secret_value() == "test-key"
     assert model.temperature == 0.1
-    assert model.bind_tools([calculator]).kwargs["tools"][0]["function"]["name"] == "calculator"
+    assert model.bind_tools([calculate_share]).kwargs["tools"][0]["function"]["name"] == "calculate_share"
 
 
 def test_missing_groq_key_has_actionable_error(monkeypatch):

@@ -1,19 +1,11 @@
-"""Graph state and runtime context.
+"""Graph state and per-run context.
+📘 LEARN: State changes during a run and is checkpointed. Context identifies the user
+and is supplied by the caller on every run/resume; it is not checkpointed.
+Nodes return partial updates instead of mutating state.
 
-📘 LEARN — two kinds of data flow through a LangGraph run:
-
-    ┌──────────────────┬───────────────────────────────┬──────────────────────────────┐
-    │                  │ State (AgentState)            │ Context (AgentContext)       │
-    ├──────────────────┼───────────────────────────────┼──────────────────────────────┤
-    │ What             │ everything that changes       │ static info about this run   │
-    │ Who writes it    │ nodes (by returning updates)  │ the caller, once             │
-    │ Persisted?       │ yes, after every super-step   │ no                           │
-    │ Passed how       │ graph.astream({"messages":…}) │ graph.astream(…, context=…)  │
-    │ Example          │ messages, counters, summary   │ user_id, tenant, API keys    │
-    └──────────────────┴───────────────────────────────┴──────────────────────────────┘
-
-Rule of thumb: if it must survive a pause/restart or nodes need to change it → State.
-If it identifies *who/what* the run is for and never changes mid-run → Context.
+图状态与单次运行上下文。
+📘 LEARN：State 在运行中变化并持久化；Context 标识用户，
+由调用方在每次运行或恢复时传入，不保存在检查点中。节点返回局部更新，不直接修改状态。
 """
 
 from __future__ import annotations
@@ -25,44 +17,37 @@ from langgraph.graph import MessagesState
 
 
 class AgentState(MessagesState):
-    """Everything the graph carries between nodes (and persists via the checkpointer).
+    """Persisted state shared by graph nodes.
+    📘 LEARN: messages inherits the add_messages reducer: append new IDs, replace existing IDs,
+    and delete with RemoveMessage. Other fields use last-write-wins.
+    ⚠ PITFALL: a new thread may omit fields; use state.get with defaults.
+    Iteration/reflection counters and approval decisions reset each user turn.
 
-    📘 LEARN — reducers: each key has a rule for merging a node's update into the state.
-      • `messages` (inherited from MessagesState) uses `add_messages`:
-            return [new_msg]              → appended
-            return [msg_with_existing_id] → that message is REPLACED   (used by approval_gate)
-            return [RemoveMessage(id=…)]  → that message is DELETED    (used by compaction/reflect)
-      • every other key below has no reducer → last write wins (plain overwrite).
-
-    You could add custom reducers with `Annotated[list, operator.add]` (e.g. to
-    accumulate a log), but overwrite is what we want for counters we reset each turn.
-
-    ⚠ PITFALL: keys are optional at runtime — a fresh thread has none of them yet.
-    That is why nodes read with `state.get("iterations", 0)` rather than `state["iterations"]`.
+    图节点共享的持久化状态。
+    📘 LEARN：messages 继承 add_messages reducer：新 ID 追加、相同 ID 替换、
+    RemoveMessage 删除。其他字段采用后写覆盖。
+    ⚠ PITFALL：新会话可能没有某些字段，读取时使用 state.get 默认值。
+    循环计数、反思计数和审批决策在每轮用户输入时重置。
     """
 
-    # --- memory management --------------------------------------------------------
-    summary: str                      # rolling summary of compacted (deleted) history
-    memories: list[str]               # long-term memories recalled for this turn
+    summary: str
+    memories: list[str]
 
-    # --- loop engineering (reset by prepare_turn at the start of every user turn) ---
-    iterations: int                   # how many times the agent node ran this turn
-    reflections: int                  # how many critic revisions happened this turn
-    loop_warning: str                 # written by loop_guard, read by the system prompt
-    critique: dict[str, Any] | None   # {"draft": ..., "feedback": ...} from the critic
+    iterations: int
+    reflections: int
+    loop_warning: str
+    critique: dict[str, Any] | None
 
-    # --- human-in-the-loop ---------------------------------------------------------
-    # tool_call_id -> {"action": "reject", "reason": ...}. Written by approval_gate,
-    # read by the tools-node interceptor, cleared by loop_guard.
     hitl_decisions: dict[str, dict[str, Any]]
 
 
 @dataclass
 class AgentContext:
-    """Static per-run context (not persisted). Passed via `graph.astream(..., context=...)`.
+    """Static per-run input, injected through Runtime in nodes and ToolRuntime in tools.
+    user_id scopes long-term memories and is never a model-controlled tool argument.
 
-    Nodes get it as `runtime.context`, tools as `runtime.context` via `ToolRuntime`.
-    Here it only scopes long-term memory: every user gets their own memory namespace.
+    单次运行的固定输入：节点通过 Runtime 获取，工具通过 ToolRuntime 获取。
+    user_id 限定长期记忆的归属，不是模型可以填写的工具参数。
     """
 
     user_id: str = "default"

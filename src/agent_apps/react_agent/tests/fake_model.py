@@ -14,6 +14,15 @@ exact ReAct trajectories, critic verdicts and summaries.
     This works because build_graph() only needs a BaseChatModel. Subclassing it and
     implementing `_generate` is enough for `ainvoke` to work; overriding `bind_tools`
     lets the responder know whether tools were offered (to test the forced final answer).
+
+用于离线测试的确定性聊天模型，无需 Groq API。
+responder(messages, tools_bound) 决定模型响应，从而精确安排 ReAct 轨迹、反思结论和摘要。
+
+📘 LEARN：Agent 测试要区分两个问题：
+  • 机制是否正确（路由、中断、预算、压缩、记忆）：用脚本模型，运行快且结果确定。
+  • 真实模型是否擅长任务（工具选择和回答质量）：用评估数据集多次运行，单独评估。
+build_graph 只依赖 BaseChatModel；实现 _generate 即可让 ainvoke 工作，
+覆盖 bind_tools 则让脚本知道是否提供了工具，用于验证预算耗尽后的最终回答。
 """
 
 from __future__ import annotations

@@ -2,6 +2,9 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+# Local ledgers, checkpoints and preferences
+# 本地账本、检查点和偏好记忆
 data/
+# Keep previous workspace data private after the theme change
+# 更换主题后继续忽略原有工作区数据
 workspace/*
-!workspace/README.md
