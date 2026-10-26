@@ -6,6 +6,10 @@ A learning project built with a hand-wired LangGraph `StateGraph`: ReAct, MCP, h
 
 这是一个手写 LangGraph `StateGraph` 的学习项目，涵盖 ReAct、MCP、人工审批、循环控制、反思和三层记忆。支出来自你的输入并保存在本地，不使用搜索、shell 执行工具、预填账目、支付或银行接口。模型推理仍通过 Groq 完成。
 
+For the design tradeoffs between `StateGraph + LLM`, `create_agent`, and `create_deep_agent`, including custom orchestration and memory boundaries, see [Agent Design](AGENT_DESIGN.md).
+
+关于 `StateGraph + LLM`、`create_agent` 和 `create_deep_agent` 的选型，以及自定义编排和记忆边界，参见 [Agent 设计说明](AGENT_DESIGN.md)。
+
 **Version 1 supports USD expenses only.** Amounts are positive with at most two decimal places; income, refunds and currency conversion are outside this version. Ask in English or Chinese; the agent responds in your language. Tool category values are fixed Chinese labels, with English meanings in their descriptions.
 
 **第一版只支持美元（USD）支出。** 金额为正数，最多两位小数；暂不处理收入、退款和汇率换算。可以使用中文或英文提问，Agent 按你的语言回答。工具分类采用固定中文值，描述中附有英文对应含义。

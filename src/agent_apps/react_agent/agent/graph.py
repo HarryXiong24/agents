@@ -42,7 +42,6 @@ from .config import settings
 from .prompts import CRITIC_PROMPT, SUMMARIZE_PROMPT, build_system_prompt
 from .state import AgentContext, AgentState
 
-
 REJECT_PREFIX = "REJECTED by human"
 
 
@@ -87,7 +86,9 @@ def _render(messages: list[AnyMessage], limit: int = 600) -> str:
             if _text(m):
                 lines.append(f"ASSISTANT: {_text(m)[:limit]}")
             for tc in m.tool_calls:
-                lines.append(f"TOOL CALL: {tc['name']}({json.dumps(tc['args'], ensure_ascii=False)[:200]})")
+                lines.append(
+                    f"TOOL CALL: {tc['name']}({json.dumps(tc['args'], ensure_ascii=False)[:200]})"
+                )
         elif isinstance(m, ToolMessage):
             lines.append(f"TOOL RESULT [{m.name}]: {_text(m)[:limit]}")
     return "\n".join(lines)
@@ -100,7 +101,7 @@ def _parse_json(text: str) -> dict:
     从模型说明文字或代码块中提取 JSON；格式错误时返回空结果。
     反思解析失败时放行：它是质量检查，不能充当授权检查。
     """
-    match = re.search(r"\{.*\}", text, re.S)
+    match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
         return {}
     try:
@@ -134,7 +135,10 @@ def _normalize_tool_result(result):
     if isinstance(result, ToolMessage):
         text = _text(result)
         if len(text) > MAX_TOOL_OUTPUT:
-            text = text[:MAX_TOOL_OUTPUT] + f"\n... [truncated {len(text) - MAX_TOOL_OUTPUT} chars]"
+            text = (
+                text[:MAX_TOOL_OUTPUT]
+                + f"\n... [truncated {len(text) - MAX_TOOL_OUTPUT} chars]"
+            )
         if text != result.content:
             result = result.model_copy(update={"content": text})
     return result
@@ -209,7 +213,9 @@ def build_graph(
             return {}
         old = msgs[:cut]
 
-        prompt = SUMMARIZE_PROMPT.format(summary=state.get("summary", ""), transcript=_render(old))
+        prompt = SUMMARIZE_PROMPT.format(
+            summary=state.get("summary", ""), transcript=_render(old)
+        )
         summary = _text(await model.ainvoke([HumanMessage(prompt)])).strip()
 
         return {"summary": summary, "messages": [RemoveMessage(id=m.id) for m in old]}
@@ -235,7 +241,9 @@ def build_graph(
 
         return {"messages": [response], "iterations": iterations}
 
-    def route_after_agent(state: AgentState) -> Literal["approval_gate", "tools", "reflect", "__end__"]:
+    def route_after_agent(
+        state: AgentState,
+    ) -> Literal["approval_gate", "tools", "reflect", "__end__"]:
         """Route tool calls to approval/tools, or an answer to reflection/END.
         Routers only return node names; they do not update state. Literal helps graph rendering.
         Reflection runs only after tool use, with revision budget and an agent step remaining.
@@ -282,7 +290,10 @@ def build_graph(
         response = interrupt(
             {
                 "type": "approval",
-                "calls": [{"id": tc["id"], "name": tc["name"], "args": tc["args"]} for tc in risky],
+                "calls": [
+                    {"id": tc["id"], "name": tc["name"], "args": tc["args"]}
+                    for tc in risky
+                ],
             }
         )
 
@@ -292,8 +303,16 @@ def build_graph(
 
         new_calls, hitl = [], {}
         for tc in last.tool_calls:
-            d = decisions.get(tc["id"], {}) if tc["name"] in settings.risky_tools else {"action": "approve"}
-            if not isinstance(d, dict) or d.get("action") not in ("approve", "edit", "reject"):
+            d = (
+                decisions.get(tc["id"], {})
+                if tc["name"] in settings.risky_tools
+                else {"action": "approve"}
+            )
+            if not isinstance(d, dict) or d.get("action") not in (
+                "approve",
+                "edit",
+                "reject",
+            ):
                 d = {"action": "reject", "reason": "缺少有效的人工审批决策"}
             if d.get("action") == "edit" and not isinstance(d.get("args"), dict):
                 d = {"action": "reject", "reason": "修改后的参数必须是 JSON 对象"}
@@ -328,7 +347,9 @@ def build_graph(
                 name="ask_human",
                 status="error",
             )
-        decision = (request.state.get("hitl_decisions") or {}).get(request.tool_call["id"])
+        decision = (request.state.get("hitl_decisions") or {}).get(
+            request.tool_call["id"]
+        )
         if decision and decision["action"] == "reject":
             return ToolMessage(
                 content=f"{REJECT_PREFIX}. Reason: {decision['reason'] or 'not given'}. "
@@ -337,7 +358,9 @@ def build_graph(
                 name=request.tool_call["name"],
                 status="error",
             )
-        result = await asyncio.wait_for(execute(request), timeout=settings.tool_timeout_seconds)
+        result = await asyncio.wait_for(
+            execute(request), timeout=settings.tool_timeout_seconds
+        )
         return _normalize_tool_result(result)
 
     # 📘 LEARN: independent calls in one AIMessage run in parallel, each producing a ToolMessage.
@@ -363,12 +386,15 @@ def build_graph(
 
         calls = Counter(
             f"{tc['name']}({json.dumps(tc['args'], sort_keys=True, ensure_ascii=False)})"
-            for m in turn if isinstance(m, AIMessage) for tc in m.tool_calls
+            for m in turn
+            if isinstance(m, AIMessage)
+            for tc in m.tool_calls
         )
         warnings = [
             f"You have called {sig} {n} times this turn with identical arguments. "
             "The result will not change. Use what you have or try a different approach."
-            for sig, n in calls.items() if n >= settings.repeat_call_limit
+            for sig, n in calls.items()
+            if n >= settings.repeat_call_limit
         ]
 
         streak = 0
@@ -412,15 +438,28 @@ def build_graph(
                 goto="agent",
                 update={
                     "reflections": reflections,
-                    "critique": {"draft": _text(draft), "feedback": verdict["feedback"]},
+                    "critique": {
+                        "draft": _text(draft),
+                        "feedback": verdict["feedback"],
+                    },
                     "messages": [RemoveMessage(id=draft.id)],
                 },
             )
 
         return Command(goto=END, update={"reflections": reflections, "critique": None})
 
-    # 📘 LEARN: context_schema enables Runtime/ToolRuntime injection. destinations documents Command routes.
-    # 📘 LEARN：context_schema 启用 Runtime/ToolRuntime 注入；destinations 声明 Command 的可能路由。
+    # 📘 LEARN: StateGraph creates a builder; compile() below makes it executable.
+    # AgentState is the positional state_schema: shared fields and their update reducers.
+    # AgentContext defines per-run context, supplied via context=AgentContext(user_id=...).
+    # Nodes/tools read it through runtime.context; it is not checkpointed with state.
+    # Optional input_schema/output_schema default to AgentState when omitted.
+    # 📘 LEARN：StateGraph 创建图构建器，下面的 compile() 才生成可执行图。
+    # AgentState 对应第一个参数 state_schema，定义节点共享的字段及其更新合并规则；
+    # messages 使用 add_messages 合并，其他普通字段默认覆盖。
+    # context_schema=AgentContext 定义单次运行上下文的结构，并不传入实际的 user_id；
+    # 调用图时用 context=AgentContext(user_id=...) 传值，节点/工具用 runtime.context 读取。
+    # Context 不随 State 保存到检查点，恢复运行时也要重新传入。
+    # 可选参数 input_schema/output_schema 定义图的输入/输出结构，省略时均使用 AgentState。
     g = StateGraph(AgentState, context_schema=AgentContext)
 
     g.add_node("prepare_turn", prepare_turn)
@@ -429,15 +468,43 @@ def build_graph(
     g.add_node("approval_gate", approval_gate)
     g.add_node("tools", tool_node)
     g.add_node("loop_guard", loop_guard)
+    # destinations documents possible Command routes; reflect chooses one with goto.
+    # destinations 声明 Command 的可能路由，reflect 通过 goto 选择实际去向。
     g.add_node("reflect", reflect, destinations=("agent", END))
 
     g.add_edge(START, "prepare_turn")
     g.add_edge("prepare_turn", "compact_context")
     g.add_edge("compact_context", "agent")
 
-    g.add_conditional_edges("agent", route_after_agent, ["approval_gate", "tools", "reflect", END])
+    g.add_conditional_edges(
+        "agent", route_after_agent, ["approval_gate", "tools", "reflect", END]
+    )
     g.add_edge("approval_gate", "tools")
     g.add_edge("tools", "loop_guard")
     g.add_edge("loop_guard", "compact_context")
 
+    # 图结构（每个节点只画一次；箭头表示有向边，+ 表示连线汇合或分叉）：
+    #
+    #                                                [START]
+    #                                                   |
+    #                                                   v
+    #                                            [prepare_turn]
+    #                                                   |
+    #                                                   v
+    #       [loop_guard]----------------------->[compact_context]
+    #             ^                                     |
+    #             |                                     | +-------------------------+
+    #             |                                     v v                         ^
+    #             |                                  [agent]------------------->[reflect]
+    #             |                                     |                           |
+    #             |                 +-------------------+                           |
+    #             |                 |                   |                           |
+    #             |                 v                   |                           |
+    #             |          [approval_gate]            |                           |
+    #             |                 |                   |                           |
+    #             |                 |                   +-------------------------->+
+    #             |                 |                   |                           v
+    #          [tools]<-------------+-------------------+                         [END]
+    #
+    # agent 的四条出边由 route_after_agent 选择；reflect 的两条出边由 Command 选择。
     return g.compile(checkpointer=checkpointer, store=store)
