@@ -347,8 +347,13 @@ async def main() -> None:
     args = parser.parse_args()
 
     model = get_chat_model()
+    # 创建应用数据目录（Path 对象）；后续在这里保存长期记忆 store.sqlite 等数据。
+    # parents=True：缺少的上级目录也一起创建；exist_ok=True：目录已存在时不报错。
     settings.data_dir.mkdir(parents=True, exist_ok=True)
+    # 根据 --user 的值计算用户专属路径：data_dir / "users" / 用户 ID 的 SHA-256 哈希。
+    # 哈希避免用户 ID 中的斜杠影响路径；这里只计算路径，不会创建目录。
     user_dir = user_data_dir(args.user)
+    # 创建这个用户的目录，供其账本和会话检查点使用；重复启动时保留已有目录和数据。
     user_dir.mkdir(parents=True, exist_ok=True)
 
     print(
