@@ -41,6 +41,7 @@ resume-digging-agent = "agent_apps.resume_digging_agent.__main__:main"
 deep-research-agent = "agent_apps.deep_research_agent.__main__:main"
 agent-by-langgraph = "agent_apps.agent_by_langgraph.__main__:main"
 react-agent = "agent_apps.react_agent.__main__:main"
+simple-react-agent = "agent_apps.simple_react_agent.main:main"
 
 [dependency-groups]
 dev = ["pytest"]
