@@ -1,10 +1,12 @@
-"""第二块积木：两个普通的本地函数，用 @tool 变成模型可调用的工具。"""
+"""第二块积木：时间、计算、学习计划保存和删除，全部使用本地工具。"""
 
 import math
 from datetime import datetime
 from typing import Literal
 
 from langchain_core.tools import tool
+
+from . import memory
 
 
 @tool
@@ -44,5 +46,40 @@ def calculate(a: float, b: float, operation: Literal["加", "减", "乘", "除"]
     return str(result)
 
 
-# 两个工具都在当前进程执行；列表会同时用于绑定模型和创建工具节点。
-TOOLS = [get_current_time, calculate]
+@tool
+def save_study_plan(project: str, minutes: int, date: str) -> str:
+    """保存一条学习计划，重启后仍可读取，仅在用户要求保存或更新计划时使用。
+
+    project 是学习项目；minutes 是 1 到 1440 之间的整数分钟数；date 是 YYYY-MM-DD 日期。
+    例如“保存2026年10月29日学习Python一小时”：project="Python"，minutes=60，date="2026-10-29"。
+    三个属性缺少任意一个时先向用户询问；相对日期先用时间工具确认，小时先换算成分钟。
+    同项目同日期再次保存时更新时长；不同项目或不同日期新增计划。
+    """
+    # 写入成功后才输出成功提示；失败时异常由工具节点转换成错误结果。
+    plan = memory.save_plan(project, minutes, date)
+    result = f"已保存学习计划：{plan['project']}，{plan['minutes']} 分钟，{plan['date']}。"
+    print(f"工具：{result}")
+    return result
+
+
+@tool
+def delete_study_plan(project: str, date: str) -> str:
+    """按项目和日期删除学习计划，仅在用户明确要求删除时使用，无需提供时长。
+
+    project 必须是要删除的学习项目，date 必须是 YYYY-MM-DD 日期。
+    例如“删除2026年10月29日的Python计划”：project="Python"，date="2026-10-29"。
+    项目或日期不明确时先询问；相对日期先通过时间工具确认。
+    仅删除指定项目、指定日期的一条计划，找不到时如实返回，不删除其他计划。
+    """
+    deleted = memory.delete_plan(project, date)
+    if deleted:
+        result = f"已删除学习计划：{project.strip()}，{date}。"
+    else:
+        result = f"未找到学习计划：{project.strip()}，{date}；没有删除任何计划。"
+    print(f"工具：{result}")
+    return result
+
+
+# 所有工具都在当前进程执行；列表同时用于绑定模型和创建工具节点。
+# 新工具加入列表即可使用，原来两个节点的连线不需要改变。
+TOOLS = [get_current_time, calculate, save_study_plan, delete_study_plan]

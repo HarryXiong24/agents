@@ -1,48 +1,21 @@
 """学习路线：创建模型 → 定义两个节点 → 连线 → 在终端循环对话。
 
-本文件使用同步调用，便于沿执行顺序阅读。会话历史只保存在内存里。
+本文件使用同步调用，便于沿执行顺序阅读。会话历史保存在内存里，学习计划保存在文件里。
 """
 
-import os
-from pathlib import Path
+import readline
 
-from dotenv import load_dotenv
+from groq import APIError
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_groq import ChatGroq
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 
+from . import memory
+from .model import create_model
+from .prompts import TOOL_ERROR_MESSAGE, build_system_prompt
 from .tools import TOOLS
-
-
-SYSTEM_PROMPT = """你是学习时间小助手，始终使用中文，简短、清楚地回答。
-你可以陪用户讨论学习安排，也可以使用工具获取当前时间、计算学习时长。
-涉及数值运算时使用计算器；询问当前时间时使用时间工具。
-需要多步计算时，先调用工具得到结果，再根据结果继续调用工具，最后回答。
-注意分钟与小时的换算，一小时等于六十分钟。普通交流直接回答即可。
-工具返回错误时，检查参数；无法继续时向用户说明，不要编造结果。
-你只能参考本次对话历史，不要声称能在程序重启后记住信息。
-"""
-
-
-def create_model() -> BaseChatModel:
-    """第一块积木：读取项目根目录的配置，创建聊天模型。"""
-    project_root = Path(__file__).resolve().parents[3]
-    load_dotenv(project_root / ".env")
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        raise ValueError("请在项目根目录的 .env 中设置 GROQ_API_KEY。")
-
-    return ChatGroq(
-        model=os.getenv("AGENT_MODEL") or "openai/gpt-oss-20b",
-        api_key=api_key,
-        base_url=os.getenv("GROQ_BASE_URL") or "https://api.groq.com",
-        temperature=0,
-        timeout=30,
-        max_retries=1,
-    )
 
 
 def build_graph(model: BaseChatModel):
@@ -50,14 +23,18 @@ def build_graph(model: BaseChatModel):
     # 绑定工具说明，让模型知道有哪些工具和参数；这一步不会执行工具。
     model_with_tools = model.bind_tools(TOOLS)
 
+    # 节点函数：返回状态更新。
     def call_model(state: MessagesState):
+        # 第二版新增：每次调用模型前读取全部计划，工具刚保存的计划也能立即使用。
+        # 文件只负责保存；这里把计划加入提示词，模型才能看到并参考它。
+        plans = memory.load_plans()
+        system = build_system_prompt(plans)
         # 系统提示词只随请求发送，不反复追加到历史中。
-        response = model_with_tools.invoke(
-            [SystemMessage(SYSTEM_PROMPT), *state["messages"]]
-        )
+        response = model_with_tools.invoke([SystemMessage(system), *state["messages"]])
         # MessagesState 会合并消息：新 ID 追加，相同 ID 替换。
         return {"messages": [response]}
 
+    # 条件路由函数：返回下一节点的名称。
     def route_after_model(state: MessagesState):
         # 模型提出工具调用就去执行，否则本轮回答完成。
         if state["messages"][-1].tool_calls:
@@ -68,24 +45,31 @@ def build_graph(model: BaseChatModel):
     graph.add_node("model", call_model)
     graph.add_node(
         "tools",
-        ToolNode(TOOLS, handle_tool_errors="工具执行失败，请检查参数后重试，或向用户说明。"),
+        ToolNode(TOOLS, handle_tool_errors=TOOL_ERROR_MESSAGE),
     )
 
     graph.add_edge(START, "model")
     graph.add_conditional_edges("model", route_after_model, ["tools", END])
     graph.add_edge("tools", "model")
+
     # 没有检查点：完整历史由下面的终端循环显式保存和传入。
     return graph.compile()
 
 
 def chat(graph) -> None:
     """第四块积木：接收输入，运行一轮，再保存完整消息历史。"""
+    # 导入 readline 后，input() 会按完整字符编辑中文，避免退格只删除部分 UTF-8 字节。
+    # 关闭自动输入历史，仍然只由下面的 messages 列表管理对话。
+    readline.set_auto_history(False)
     messages = []
-    print("学习时间小助手已启动。输入“退出”结束；本次对话仅保存在内存中。")
+    print(
+        "学习时间小助手已启动。输入“退出”结束；对话保存在内存中，学习计划可保存到文件。"
+    )
 
     while True:
         try:
-            text = input("你：").strip()
+            print("------")
+            text = input("输入：").strip()
             if text == "退出":
                 break
             if not text:
@@ -106,8 +90,14 @@ def chat(graph) -> None:
             break
         except GraphRecursionError:
             print("助手：本轮工具调用步骤过多，请缩小问题范围后重试。\n")
-        except Exception as exc:
-            print(f"助手：本轮执行失败，请检查网络、模型配置或输入后重试。详情：{exc}\n")
+        except APIError as exc:
+            print(
+                f"助手：本轮执行失败，请检查网络、密钥或模型配置后重试。详情：{exc}\n"
+            )
+        # 处理文件读写错误，以及计划读取时明确抛出的值错误和类型错误。
+        # 未列出的异常继续抛出，保留错误堆栈供排查。
+        except (OSError, ValueError, TypeError) as exc:
+            print(f"助手：本轮执行失败，请检查学习计划文件或输入后重试。详情：{exc}\n")
 
     print("助手：再见！")
 
@@ -115,7 +105,9 @@ def chat(graph) -> None:
 def main() -> None:
     """把模型、图和终端对话连接起来。"""
     try:
-        graph = build_graph(create_model())
-    except Exception as exc:
+        model = create_model()
+    except (OSError, ValueError) as exc:
         raise SystemExit(f"启动失败：{exc}") from exc
+    # 图的构建错误直接抛出，避免把节点或连线问题误当作模型配置错误。
+    graph = build_graph(model)
     chat(graph)
