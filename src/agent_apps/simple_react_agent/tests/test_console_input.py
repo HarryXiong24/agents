@@ -1,4 +1,4 @@
-"""使用伪终端检查真实的中文退格行为，无需模型密钥或网络。"""
+"""Check Unicode backspace in a real pseudo-terminal without API keys or network."""
 
 import os
 import select
@@ -9,13 +9,16 @@ import time
 import pytest
 
 
-@pytest.mark.parametrize(("typed", "expected"), [
-    ("你\x7f好", "好"),
-    ("你好\x7f\x7f再见", "再见"),
-    ("A你B\x7f\x7f\x7f学习", "学习"),
-])
+@pytest.mark.parametrize(
+    ("typed", "expected"),
+    [
+        ("你\x7f好", "好"),
+        ("你好\x7f\x7f再见", "再见"),
+        ("A你B\x7f\x7f\x7f学习", "学习"),
+    ],
+)
 def test_backspace_can_delete_first_chinese_character(typed, expected):
-    # 普通管道不能模拟终端退格，必须给子进程提供真实的终端接口。
+    # A pipe cannot simulate terminal editing; give the child a pseudo-terminal.
     master, slave = os.openpty()
     code = """
 from types import SimpleNamespace
@@ -24,13 +27,15 @@ from agent_apps.simple_react_agent.main import chat
 
 def echo(state, config):
     text = state["messages"][-1].content
-    return {"messages": [AIMessage(content="回显：" + text)]}
+    return {"messages": [AIMessage(content="Echo: " + text)]}
 
 chat(SimpleNamespace(invoke=echo))
 """
     process = subprocess.Popen(
         [sys.executable, "-u", "-c", code],
-        stdin=slave, stdout=slave, stderr=slave,
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
     )
     os.close(slave)
 
@@ -39,21 +44,21 @@ chat(SimpleNamespace(invoke=echo))
         deadline = time.monotonic() + 10
         while marker not in output:
             remaining = deadline - time.monotonic()
-            assert remaining > 0, f"等待终端输出超时：{output!r}"
+            assert remaining > 0, f"Timed out waiting for terminal output: {output!r}"
             ready, _, _ = select.select([master], [], [], remaining)
-            assert ready, f"等待终端输出超时：{output!r}"
+            assert ready, f"Timed out waiting for terminal output: {output!r}"
             chunk = os.read(master, 4096)
-            assert chunk, "终端提前关闭"
+            assert chunk, "Terminal closed early"
             output += chunk
         return output.decode("utf-8")
 
     try:
-        read_until("输入：".encode())
-        # DEL 表示真实退格键；替换内容提交后，再用“退出”正常结束。
-        os.write(master, (typed + "\n退出\n").encode())
-        output = read_until("助手：再见！".encode())
+        read_until(b"You: ")
+        # DEL represents Backspace; submit the replacement text, then exit normally.
+        os.write(master, (typed + "\nexit\n").encode())
+        output = read_until(b"Assistant: Goodbye!")
         assert process.wait(timeout=5) == 0
-        assert f"助手：回显：{expected}\r\n" in output
+        assert f"Assistant: Echo: {expected}\r\n" in output
     finally:
         if process.poll() is None:
             process.kill()

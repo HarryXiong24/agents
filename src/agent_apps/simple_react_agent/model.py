@@ -1,4 +1,4 @@
-"""第一块积木：读取模型配置，创建聊天模型。"""
+"""Block 1: load configuration and create the chat model."""
 
 import os
 from pathlib import Path
@@ -9,12 +9,12 @@ from langchain_groq import ChatGroq
 
 
 def create_model() -> BaseChatModel:
-    """读取项目根目录的配置，创建聊天模型。"""
+    """Read configuration from the project root and create the chat model."""
     project_root = Path(__file__).resolve().parents[3]
     load_dotenv(project_root / ".env")
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        raise ValueError("请在项目根目录的 .env 中设置 GROQ_API_KEY。")
+        raise ValueError("Set GROQ_API_KEY in the project root .env file.")
 
     return ChatGroq(
         model=os.getenv("AGENT_MODEL") or "openai/gpt-oss-20b",

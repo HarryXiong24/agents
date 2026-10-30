@@ -1,1 +1,1 @@
-"""学习时间小助手：通过最小的 ReAct 循环学习智能体。"""
+"""Study Time Assistant: learn agents through a minimal ReAct loop."""

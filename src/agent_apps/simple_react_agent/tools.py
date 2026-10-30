@@ -1,4 +1,4 @@
-"""第二块积木：时间、计算、学习计划保存和删除，全部使用本地工具。"""
+"""Block 2: local tools for time, arithmetic, and study plan writes."""
 
 import math
 from datetime import datetime
@@ -11,75 +11,75 @@ from . import memory
 
 @tool
 def get_current_time() -> str:
-    """获取电脑当前的本地日期和时间。当用户询问现在的时间时使用。"""
-    print("工具：正在获取当前时间。")
-    return datetime.now().strftime("%Y年%m月%d日 %H时%M分%S秒")
+    """Get the computer's local date and time for current or relative dates."""
+    print("Tool: Getting the current local time.")
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 @tool
-def calculate(a: float, b: float, operation: Literal["加", "减", "乘", "除"]) -> str:
-    """计算两个数字的加、减、乘、除，用于学习时长等数值计算。
+def calculate(a: float, b: float, operation: Literal["add", "subtract", "multiply", "divide"]) -> str:
+    """Add, subtract, multiply, or divide two numbers, including study durations.
 
-    参数 a 是第一个数字，b 是第二个数字。
-    operation 必须是“加”“减”“乘”“除”之一。
-    例如计算每天学习 45 分钟、连续 7 天的总时长：a=45，b=7，operation="乘"。
-    一次只执行一种运算，多步计算需要根据结果再次调用工具。
+    a is the first number; b is the second number.
+    operation must be add, subtract, multiply, or divide.
+    Example: 45 minutes per day for 7 days uses a=45, b=7, operation="multiply".
+    Perform one operation per call; use the result in subsequent calls as needed.
     """
-    print(f"工具：计算 {a} {operation} {b}。")
+    print(f"Tool: Calculating {a} {operation} {b}.")
     if not math.isfinite(a) or not math.isfinite(b):
-        return "无法计算：请输入有限的数字。"
+        return "Cannot calculate: enter finite numbers."
 
-    # 明确列出四种运算，方便阅读，也不需要执行模型生成的代码或表达式。
-    if operation == "加":
+    # Explicit branches keep the code readable without evaluating generated code.
+    if operation == "add":
         result = a + b
-    elif operation == "减":
+    elif operation == "subtract":
         result = a - b
-    elif operation == "乘":
+    elif operation == "multiply":
         result = a * b
     else:
         if b == 0:
-            return "无法计算：除数不能为零，请检查数字或向用户说明。"
+            return "Cannot calculate: the divisor must not be zero. Check the numbers or explain the issue."
         result = a / b
 
     if not math.isfinite(result):
-        return "无法计算：结果超出支持的数值范围。"
+        return "Cannot calculate: the result is outside the supported numeric range."
     return str(result)
 
 
 @tool
 def save_study_plan(project: str, minutes: int, date: str) -> str:
-    """保存一条学习计划，重启后仍可读取，仅在用户要求保存或更新计划时使用。
+    """Save a study plan across restarts when the user asks to save or update it.
 
-    project 是学习项目；minutes 是 1 到 1440 之间的整数分钟数；date 是 YYYY-MM-DD 日期。
-    例如“保存2026年10月29日学习Python一小时”：project="Python"，minutes=60，date="2026-10-29"。
-    三个属性缺少任意一个时先向用户询问；相对日期先用时间工具确认，小时先换算成分钟。
-    同项目同日期再次保存时更新时长；不同项目或不同日期新增计划。
+    project is the study topic, minutes is an integer from 1 to 1440, and date is YYYY-MM-DD.
+    Example: project="Python", minutes=60, date="2026-10-29".
+    Ask for missing fields. Resolve relative dates with the time tool and convert hours to minutes.
+    The same project and date updates duration; a different project or date adds a plan.
     """
-    # 写入成功后才输出成功提示；失败时异常由工具节点转换成错误结果。
+    # Report success only after the write; the tool node handles execution errors.
     plan = memory.save_plan(project, minutes, date)
-    result = f"已保存学习计划：{plan['project']}，{plan['minutes']} 分钟，{plan['date']}。"
-    print(f"工具：{result}")
+    result = f"Saved study plan: {plan['project']}, {plan['minutes']} minutes, {plan['date']}."
+    print(f"Tool: {result}")
     return result
 
 
 @tool
 def delete_study_plan(project: str, date: str) -> str:
-    """按项目和日期删除学习计划，仅在用户明确要求删除时使用，无需提供时长。
+    """Delete a study plan by project and date only when explicitly requested.
 
-    project 必须是要删除的学习项目，date 必须是 YYYY-MM-DD 日期。
-    例如“删除2026年10月29日的Python计划”：project="Python"，date="2026-10-29"。
-    项目或日期不明确时先询问；相对日期先通过时间工具确认。
-    仅删除指定项目、指定日期的一条计划，找不到时如实返回，不删除其他计划。
+    project is the study topic; date must use YYYY-MM-DD. Duration is not required.
+    Example: project="Python", date="2026-10-29".
+    Ask if the project or date is unclear; resolve relative dates with the time tool.
+    Delete only the matching plan. If it is missing, report that and preserve other plans.
     """
     deleted = memory.delete_plan(project, date)
     if deleted:
-        result = f"已删除学习计划：{project.strip()}，{date}。"
+        result = f"Deleted study plan: {project.strip()}, {date}."
     else:
-        result = f"未找到学习计划：{project.strip()}，{date}；没有删除任何计划。"
-    print(f"工具：{result}")
+        result = f"Study plan not found: {project.strip()}, {date}. No plans were deleted."
+    print(f"Tool: {result}")
     return result
 
 
-# 所有工具都在当前进程执行；列表同时用于绑定模型和创建工具节点。
-# 新工具加入列表即可使用，原来两个节点的连线不需要改变。
+# All tools run locally. Both model binding and the tool node use this list.
+# Adding a tool here does not require changing the graph's edges.
 TOOLS = [get_current_time, calculate, save_study_plan, delete_study_plan]

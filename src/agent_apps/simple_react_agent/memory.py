@@ -1,21 +1,18 @@
-"""第五块积木：用 JSON 列表保存学习计划，每条只有项目、分钟数、日期。"""
+"""Version 3: store study plans in SQLite and return three-field dictionaries."""
 
-import json
+import sqlite3
+from collections.abc import Generator
+from contextlib import closing, contextmanager
 from datetime import date as calendar_date
 from pathlib import Path
-from tempfile import NamedTemporaryFile
-from threading import Lock
 from typing import TypedDict
 
-# 根据本文件的位置确定路径，从不同工作目录启动时也会读写同一个文件。
-# 文件在首次保存时创建；只保存计划，不保存整段对话。
-PLANS_FILE = Path(__file__).resolve().parent / "data" / "study_plans.json"
-# 同一批工具调用可能并行执行，保存和删除共用锁，避免“读、改、写”相互覆盖。
-_WRITE_LOCK = Lock()
+# Anchor the path to this module so changing the working directory has no effect.
+DATABASE_FILE = Path(__file__).resolve().parent / "data" / "study_plans.sqlite"
 
 
 class StudyPlan(TypedDict):
-    """一条计划只有这三个字段；TypedDict 帮助阅读，实际校验由下面的函数执行。"""
+    """A plan has exactly these fields; functions below validate data at runtime."""
 
     project: str
     minutes: int
@@ -23,107 +20,89 @@ class StudyPlan(TypedDict):
 
 
 def _validate_plan_key(project: str, planned_date: str) -> tuple[str, str]:
-    """项目和日期共同定位计划，读取、保存、删除共用校验。"""
+    """Project and date identify a plan; reads and writes share this validation."""
     if not isinstance(project, str):
-        raise TypeError("学习项目必须是字符串。")
+        raise TypeError("The study project must be a string.")
     project = project.strip()
     if not project:
-        raise ValueError("学习项目不能为空。")
+        raise ValueError("The study project must not be empty.")
     if not isinstance(planned_date, str):
-        raise TypeError("学习日期必须是字符串。")
+        raise TypeError("The study date must be a string.")
     try:
         parsed_date = calendar_date.fromisoformat(planned_date)
     except ValueError as exc:
-        raise ValueError("学习日期必须是 YYYY-MM-DD 格式的真实日期。") from exc
-    # fromisoformat 也接受某些其他 ISO 写法，这里统一要求年月日完整格式。
+        raise ValueError(
+            "The study date must be a valid date in YYYY-MM-DD format."
+        ) from exc
+    # fromisoformat accepts other ISO forms; require the full calendar date here.
     if parsed_date.isoformat() != planned_date:
-        raise ValueError("学习日期必须使用 YYYY-MM-DD 格式。")
+        raise ValueError("The study date must use YYYY-MM-DD format.")
     return project, planned_date
 
 
 def _validate_plan(project: str, minutes: int, planned_date: str) -> StudyPlan:
-    """类型错误用 TypeError，内容或范围错误用 ValueError。"""
+    """Use TypeError for invalid types and ValueError for invalid values."""
     project, planned_date = _validate_plan_key(project, planned_date)
     if type(minutes) is not int:
-        raise TypeError("学习时长必须是整数分钟。")
+        raise TypeError("Study duration must be an integer number of minutes.")
     if not 1 <= minutes <= 1440:
-        raise ValueError("学习时长必须是 1 到 1440 之间的整数分钟。")
+        raise ValueError("Study duration must be between 1 and 1440 minutes.")
     return {"project": project, "minutes": minutes, "date": planned_date}
 
 
 def load_plans() -> list[StudyPlan]:
-    """读取全部学习计划；首次启动没有文件时返回空列表。"""
-    if not PLANS_FILE.exists():
-        return []
-    try:
-        plans = json.loads(PLANS_FILE.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            "学习计划文件不是有效的 JSON，请检查 study_plans.json。"
-        ) from exc
-    if not isinstance(plans, list):
-        raise TypeError("学习计划文件必须是 JSON 数组。")
-
-    validated = []
-    for plan in plans:
-        if not isinstance(plan, dict):
-            raise TypeError("每条学习计划必须是 JSON 对象。")
-        if set(plan) != {"project", "minutes", "date"}:
-            raise ValueError(
-                "每条学习计划必须且只能包含 project、minutes、date 三个字段。"
-            )
-        validated.append(_validate_plan(plan["project"], plan["minutes"], plan["date"]))
-    return validated
+    """Return all plans in insertion order, or an empty list if there are none."""
+    with _connect() as connection:
+        rows = connection.execute(
+            "SELECT project, minutes, date FROM study_plans ORDER BY rowid"
+        ).fetchall()
+    # sqlite3.Row supports column names; keep version 2's return shape for prompts.
+    return [_validate_plan(row["project"], row["minutes"], row["date"]) for row in rows]
 
 
 def save_plan(project: str, minutes: int, planned_date: str) -> StudyPlan:
-    """新增计划；同一项目、同一日期已经存在时更新时长，其他计划保留。"""
+    """Insert a plan or update its duration when project and date already exist."""
     plan = _validate_plan(project, minutes, planned_date)
-    with _WRITE_LOCK:
-        plans = load_plans()
-        for index, existing in enumerate(plans):
-            if (
-                existing["project"] == plan["project"]
-                and existing["date"] == plan["date"]
-            ):
-                plans[index] = plan
-                break
-        else:
-            # for ... else：没有找到相同项目、日期时，添加一条新计划。
-            plans.append(plan)
-
-        _write_plans(plans)
+    with _connect() as connection:
+        # Bind values using ? parameters, including project names containing quotes.
+        # Update only duration on a key conflict, preserving insertion order.
+        connection.execute(
+            """INSERT INTO study_plans (project, minutes, date) VALUES (?, ?, ?)
+            ON CONFLICT(project, date) DO UPDATE SET minutes = excluded.minutes""",
+            (plan["project"], plan["minutes"], plan["date"]),
+        )
+    # Return only after the transaction commits so tools can report success.
     return plan
 
 
 def delete_plan(project: str, planned_date: str) -> bool:
-    """按项目和日期删除一条计划，成功返回 True，未找到返回 False。"""
+    """Delete by project and date; return True if deleted, otherwise False."""
     project, planned_date = _validate_plan_key(project, planned_date)
-    with _WRITE_LOCK:
-        plans = load_plans()
-        for index, plan in enumerate(plans):
-            if plan["project"] == project and plan["date"] == planned_date:
-                del plans[index]
-                # 其他项目或日期的计划保持原样；最后一条删除后写入空列表。
-                _write_plans(plans)
-                return True
-    # 未找到时不写文件；首次使用时也不创建空文件。
-    return False
+    with _connect() as connection:
+        result = connection.execute(
+            "DELETE FROM study_plans WHERE project = ? AND date = ?",
+            (project, planned_date),
+        )
+        deleted = result.rowcount > 0
+    return deleted
 
 
-def _write_plans(plans: list[StudyPlan]) -> None:
-    """保存和删除共用的写文件步骤，由调用方持有写入锁。"""
-    PLANS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    # 先写临时文件，写完后再替换正式文件，读取时就不会碰到半份 JSON。
-    temporary_path = None
-    try:
-        with NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=PLANS_FILE.parent, delete=False
-        ) as temporary:
-            temporary_path = Path(temporary.name)
-            temporary.write(json.dumps(plans, ensure_ascii=False, indent=2) + "\n")
-        # 退出 with 后文件已经关闭，再替换正式文件。
-        temporary_path.replace(PLANS_FILE)
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
+@contextmanager
+def _connect() -> Generator[sqlite3.Connection]:
+    """Open a connection, prepare the table, commit or roll back, then close."""
+    DATABASE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    # Each thread opens its own connection; SQLite waits up to 10 seconds for writes.
+    with closing(sqlite3.connect(DATABASE_FILE, timeout=10)) as connection:
+        connection.row_factory = sqlite3.Row
+        # The connection context manages transactions; closing releases the connection.
+        with connection:
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS study_plans (
+                    project TEXT NOT NULL CHECK (length(trim(project)) > 0),
+                    minutes INTEGER NOT NULL
+                        CHECK (typeof(minutes) = 'integer' AND minutes BETWEEN 1 AND 1440),
+                    date TEXT NOT NULL,
+                    PRIMARY KEY (project, date)
+                )"""
+            )
+            yield connection

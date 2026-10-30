@@ -1,155 +1,167 @@
-# 学习时间小助手
+# Study Time Assistant
 
-这是用于逐块学习的智能体，目前是第二版：普通终端对话、四个本地工具、两个图节点、内存会话历史，以及可保存、更新和删除学习计划的本地文件。每条计划只有项目、学习时长、日期三个属性。
+English | [简体中文](README.zh-CN.md)
 
-每个版本的学习过程、结构图和新增组件统一记录在 [版本学习路线](VERSIONS.md)。建议先回顾第一版，再按第二版的阅读顺序查看新增代码。
+A small agent for learning one building block at a time. The current version is **version 3**: a plain console, four local tools, two graph nodes, in-memory conversation history, and SQLite study plans. Each plan has exactly three fields: project, duration, and date.
 
-## 启动
+Code comments, tool descriptions, prompts, and terminal messages are in English. The assistant replies in English by default and can use another language when explicitly requested.
 
-在项目根目录的 `.env` 中配置密钥。模型名称和接口地址可以沿用已有配置：
+See [Version Learning Guide](docs/VERSIONS.md) for each version's learning goals, architecture diagram, changes, reading order, and exercises. Version 3 preserves version 2's CRUD behavior and starts with a fresh SQLite database; old JSON data is never imported.
+
+## Run
+
+Set your API key in the repository root `.env`. Existing model settings can be reused:
 
 ```dotenv
-GROQ_API_KEY=填写你的密钥
+GROQ_API_KEY=your-api-key
 AGENT_MODEL=openai/gpt-oss-20b
 GROQ_BASE_URL=https://api.groq.com
 ```
 
-在项目根目录运行：
+From the repository root:
 
 ```bash
 uv run simple-react-agent
 ```
 
-如果已经激活并安装了项目的虚拟环境，也可以运行：
+With the project's installed virtual environment activated, you can also run:
 
 ```bash
 python -m agent_apps.simple_react_agent
 ```
 
-输入“退出”，或按下键盘中断组合键结束。启动时已有的环境变量优先于 `.env`。
+Type `exit` or `quit`, or press Ctrl+C, to stop. Exit commands are case-insensitive. Exported environment variables take precedence over `.env`.
 
-终端使用 Python 标准库 `readline` 处理中文字符的退格和编辑，不自动记录输入历史。当前运行环境为 macOS；不需要额外安装终端输入依赖。
+The console uses Python's standard `readline` module for Unicode editing and backspace without automatically recording input history. The current environment is macOS; no extra terminal package is required.
 
-## 先体验三种对话
+## Try three conversations
 
-普通交流，不需要工具：
-
-```text
-你：你好，我想开始学习 Python。
-助手：……
-```
-
-使用工具，可能需要多步计算：
+Ordinary conversation needs no tool:
 
 ```text
-你：每天学习 45 分钟，连续 7 天，一共多少小时？请分步计算。
-工具：计算 45.0 乘 7.0。
-工具：计算 315.0 除 60.0。
-助手：一共 315 分钟，也就是 5.25 小时。
+You: Hello, I want to start learning Python.
+Assistant: ...
 ```
 
-上面是预期的过程示例，实际回复及工具调用顺序由模型决定。
-
-理解会话历史：
+Arithmetic can require more than one tool call:
 
 ```text
-你：我每天只有 30 分钟学习时间。
-助手：……
-你：按我刚才说的时间，一周能学多少小时？
-助手：……
+You: If I study 45 minutes a day for 7 days, how many hours is that? Calculate step by step.
+Tool: Calculating 45.0 multiply 7.0.
+Tool: Calculating 315.0 divide 60.0.
+Assistant: That is 315 minutes, or 5.25 hours.
 ```
 
-也可以询问“现在几点了？”，观察时间工具的调用。
+This is an illustrative trace. Actual wording and tool-call order depend on the model. Calculator operations are `add`, `subtract`, `multiply`, and `divide`.
 
-## 按积木阅读
-
-1. 读 `tools.py`：普通函数怎样通过 `@tool` 变成工具；参数和说明怎样帮助模型选择工具。
-2. 读 `model.py` 的 `create_model()`：配置和密钥怎样用于创建模型。
-3. 读 `memory.py` 和 `prompts.py`：学习计划怎样保存到文件，再读入系统提示词。
-4. 读 `build_graph()`：模型节点决定下一步，工具节点执行操作，条件边决定继续还是结束。
-5. 读 `chat()`：用户输入怎样变成消息，图返回的完整历史怎样交给下一轮。
-6. 最后看 `main()` 和 `__main__.py`，把启动过程连起来。
-
-核心流程只有一条循环：
+Conversation history lets the model reuse information from an earlier turn:
 
 ```text
-用户输入 → 模型节点
-             ├─ 提出工具调用 → 工具节点 → 回到模型节点
-             └─ 给出回答 → 本轮结束 → 等待下一次输入
+You: I only have 30 minutes a day to study.
+Assistant: ...
+You: Using the time I just mentioned, how many hours can I study in a week?
+Assistant: ...
 ```
 
-`bind_tools()` 让模型知道工具的名称、参数和用途；模型返回的是调用请求，真正执行工具的是 `ToolNode`。工具结果以消息形式返回给模型，用于继续判断。
+Ask "What time is it?" to observe the time tool. It returns local time in `YYYY-MM-DD HH:MM:SS` format.
 
-模型通常可以根据对话选择工具，但不保证每次都遵循提示词。观察程序实际打印的工具提示，可以确认是否执行了工具；程序不会展示模型的内部推理。
+## Read one block at a time
 
-## 第二版：跨重启保存学习计划
+1. `tools.py`: how `@tool`, parameter types, and descriptions expose local functions to the model.
+2. `model.py`: how `create_model()` reads configuration and creates the model.
+3. `memory.py` and `prompts.py`: how plans are stored, queried, and inserted into the system prompt.
+4. `graph.py` and `build_graph()`: how the model node, tool node, and conditional route form a loop.
+5. `main.py` and `chat()`: how user input becomes a message and complete history is carried into the next turn.
+6. `main()` and `__main__.py`: how the application starts.
+
+The core loop is:
 
 ```text
-输入：保存学习计划：2026年10月29日，学习Python，时长60分钟。
-工具：已保存学习计划：Python，60 分钟，2026-10-29。
-助手：……
-输入：退出
+User input -> Model node
+                |-- Tool calls -> Tool node -> Model node
+                |-- Final answer -> End turn -> Wait for user input
 ```
 
-重新启动后，询问“我有哪些学习计划？”。每次调用模型前会从 `data/study_plans.json` 读取全部计划，并加入系统提示词，因此不需要重新提供项目、时长和日期。
+`bind_tools()` exposes names, parameters, and descriptions. The model returns a request; `ToolNode` actually executes it and sends tool-result messages back to the model.
 
-学习计划保存为一个列表，每条只有三个字段：
+Models do not always follow instructions perfectly. Check the printed tool messages to see what actually executed. The program does not display the model's private reasoning.
+
+## Version 3: SQLite study plans
+
+```text
+You: Save a study plan for Python on 2026-10-29, lasting 60 minutes.
+Tool: Saved study plan: Python, 60 minutes, 2026-10-29.
+Assistant: ...
+You: exit
+```
+
+Restart and ask "What study plans do I have?" Before every model call, the program queries all plans from `data/study_plans.sqlite` and adds them to the system prompt.
+
+The `study_plans` table has only `project`, `minutes`, and `date` business fields. Project and date form a composite primary key. Queries still return the same dictionary-list structure for prompt formatting:
 
 ```json
 [
   {"project": "Python", "minutes": 60, "date": "2026-10-29"},
-  {"project": "英语", "minutes": 30, "date": "2026-10-29"}
+  {"project": "English", "minutes": 30, "date": "2026-10-29"}
 ]
 ```
 
-时长以整数分钟保存，范围为1到1440；日期必须是 `YYYY-MM-DD` 格式的真实日期。项目、时长、日期缺少任意一个时，助手应先询问。遇到“今天”“明天”等相对日期时，先通过时间工具确认；小时数先换算为分钟。
+Duration must be an integer from 1 to 1440 minutes, and the date must be a real calendar date in `YYYY-MM-DD` format. The assistant should ask for any missing field, use the time tool to resolve relative dates, and convert hours to minutes.
 
-同一项目、同一日期再次保存时更新时长；不同项目或不同日期会新增计划，其他记录保留。普通交流和临时计算不自动保存。比如“把2026年10月29日的Python计划更新为90分钟并保存”，只更新对应的一条。
+Saving the same project and date updates duration. A different project or date adds a plan while preserving others. Ordinary conversation and temporary calculations do not automatically write plans. For example, "Update the Python plan on 2026-10-29 to 90 minutes and save it" changes only that plan.
 
-文件在首次成功保存时创建，路径相对于 `memory.py` 固定，已加入忽略规则。它是单人共用的一份计划列表。旧版 `preferences.json` 保留在原处，但程序已不再读取；其中只有每天时长，无法自动补出项目和日期。
+The first query or write creates the database. Its path is anchored to `memory.py` and excluded from Git. Python's built-in `sqlite3` needs no database server. Each operation opens its own connection, commits or rolls back, and closes it.
 
-## 删除学习计划
+## Start fresh
+
+Version 3 creates an empty table on first use. Old JSON is neither read nor imported. New plans remain in SQLite across restarts; starting the program again does not clear them.
+
+## Delete a plan
 
 ```text
-输入：删除2026年10月29日的Python学习计划。
-工具：已删除学习计划：Python，2026-10-29。
-助手：……
+You: Delete the Python study plan for 2026-10-29.
+Tool: Deleted study plan: Python, 2026-10-29.
+Assistant: ...
 ```
 
-删除按“项目＋日期”定位，无需提供时长。条件不明确时助手应先询问；未找到时返回“没有删除任何计划”。其他项目或其他日期的计划保留，最后一条删除后文件内容为 `[]`。删除成功后立即生效，重启也会读到更新后的列表。
+Deletion matches project and date, without requiring duration. The assistant should ask if the target is unclear. A missing plan returns "No plans were deleted." Other projects and dates remain intact. Deleting the last plan leaves an empty table, and queries return `[]`, including after restart.
 
-## Markdown 提示词目录
+## Markdown prompts
 
 ```text
 simple_react_agent/
-├── prompts.py                    # 读取模板、填入计划数据
-└── prompts/                      # 只存放 Markdown，不放 __init__.py
-    ├── system_prompt.md          # 身份、工具使用、计划保存与删除规则
-    └── study_plans_prompt.md     # 带有 {plans} 占位符的计划列表模板
+├── main.py                       # Console startup and input/output
+├── graph.py                      # Graph construction, nodes, and routing
+├── prompts.py                    # Load templates and insert plan data
+└── prompt_templates/            # Markdown only; no __init__.py
+    ├── system_prompt.md          # Role, tools, saving, and deletion rules
+    └── study_plans_prompt.md     # Plan-list template with a {plans} placeholder
 ```
 
-修改助手行为时编辑对应 `.md` 文件；`prompts.py` 使用 UTF-8 读取它们，再将计划数据填入模板。模板在模块导入时读取，编辑后重新启动程序生效。简短的工具错误提示保留为 `prompts.py` 中的 `TOOL_ERROR_MESSAGE` 字符串。文件名使用小写，Python 常量名使用大写，二者没有必须一致的要求。主程序仍通过 `from .prompts import ...` 使用统一入口。
+Edit the relevant `.md` file to change instructions. `prompts.py` loads templates as UTF-8 and formats plan data. Templates load at import time, so restart after editing. The short tool-error instruction remains the `TOOL_ERROR_MESSAGE` string in `prompts.py`.
 
-## 两种记忆怎样配合
+Filenames use lowercase and Python constants use uppercase; their casing does not need to match. `graph.py` imports prompt helpers through `from .prompts import ...`; `main.py` imports `build_graph()` from `graph.py`.
 
-`messages` 是终端循环里的一个列表，保存用户消息、模型回复、工具调用和工具结果。每次调用图时传入完整列表，成功后使用图返回的完整列表替换它。
+## Two kinds of memory
 
-这里没有检查点。重启程序后对话历史清空；明确保存的学习计划仍保留在文件中。历史尚未压缩，对话过长时可退出并重新启动。单轮执行设有简单的图步数上限，出错时保留此前成功完成的对话。已经成功保存的计划不会因后续模型请求失败而回滚。
+The console's `messages` list holds user messages, model replies, tool calls, and tool results. Each graph invocation receives the full history, and a successful result replaces that list.
 
-计算器使用浮点数，适合学习时长等日常计算，不作为精确金额计算工具。
+There is no checkpointer. Restarting clears chat history while saved plans remain in SQLite. History is not compacted yet; restart for a fresh conversation if it becomes too long. A graph-step limit bounds each turn. Failed turns preserve earlier successful history, and a later model failure does not roll back plan changes already committed.
 
-## 下一块积木
+The calculator uses floating-point arithmetic for everyday duration calculations, rather than exact financial accounting.
 
-先试着新增“分钟转小时”的本地工具，并把它放进 `TOOLS`。观察为什么不必修改图的连线。
+## Next exercise
 
-第二版已加入 `memory.py` 和计划保存、删除工具。先按 [版本学习路线](VERSIONS.md) 验证保存多条计划、更新或删除指定计划和跨重启读取，当前只保留三个属性。
+Add a local "minutes to hours" tool to `TOOLS` and observe why the graph edges need no changes.
 
-## 离线验证
+Use the [Version Learning Guide](docs/VERSIONS.md) to study composite keys, SQL parameters, and transactions. Keep the current three plan fields while practicing the existing CRUD behavior.
 
-在项目根目录运行：
+## Offline checks
+
+From the repository root:
 
 ```bash
 uv run pytest -q src/agent_apps/simple_react_agent/tests
 ```
 
-测试使用模拟模型，不调用真实模型接口，不需要密钥。
+Tests use a simulated model and temporary databases. They require no API key or network. Unicode fixtures remain in regression tests to verify multibyte input and storage.

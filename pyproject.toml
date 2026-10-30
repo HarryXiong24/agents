@@ -44,7 +44,10 @@ react-agent = "agent_apps.react_agent.__main__:main"
 simple-react-agent = "agent_apps.simple_react_agent.main:main"
 
 [dependency-groups]
-dev = ["pytest"]
+dev = [
+    "pytest",
+    "ruff>=0.17.3",
+]
 
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
@@ -52,3 +55,11 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "agent_apps"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
