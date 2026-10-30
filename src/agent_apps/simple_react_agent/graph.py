@@ -2,6 +2,7 @@
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, SystemMessage
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 
@@ -10,7 +11,7 @@ from .prompts import TOOL_ERROR_MESSAGE, build_system_prompt
 from .tools import TOOLS
 
 
-def build_graph(model: BaseChatModel):
+def build_graph(model: BaseChatModel, checkpointer: BaseCheckpointSaver | None = None):
     """Block 3: build a ReAct loop with a model node and a tool node."""
     # Expose tool schemas to the model. Binding does not execute any tools.
     model_with_tools = model.bind_tools(TOOLS)
@@ -45,5 +46,6 @@ def build_graph(model: BaseChatModel):
     graph.add_conditional_edges("model", route_after_model, ["tools", END])
     graph.add_edge("tools", "model")
 
-    # The console explicitly keeps and supplies history; no checkpointer is used.
-    return graph.compile()
+    # Version 4: restore and save state by thread_id when a checkpointer is supplied.
+    # Keeping it optional lets isolated graph tests run without persistent state.
+    return graph.compile(checkpointer=checkpointer)

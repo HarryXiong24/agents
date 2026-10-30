@@ -4,7 +4,7 @@ English | [简体中文](VERSIONS.zh-CN.md)
 
 This document records what each version teaches, what it adds, and how to verify it. Append the same information when a future version adds another building block.
 
-The running code is **version 3**, using SQLite. Versions 1 and 2 describe the learning history, not separate runnable directories. Earlier file-storage details are historical; current source files contain the version 3 implementation.
+The running code is **version 4**, using SQLite for both conversation checkpoints and study plans. Versions 1 through 3 describe the learning history, not separate runnable directories. Earlier JSON storage and manual message-list management are historical; follow version 4 when reading the current conversation code.
 
 Code, prompts, tool descriptions, and terminal messages use English. The assistant replies in English by default, with another language available on explicit request. Exit with `exit` or `quit`.
 
@@ -37,7 +37,7 @@ flowchart TD
 | Model node | `call_model()` in `graph.py` | Send instructions and messages; return state updates |
 | Tool node | `ToolNode` in `graph.py` | Execute requests and create tool-result messages |
 | Conditional routing | `route_after_model()` | Continue with tools or finish the turn |
-| Console loop | `chat()` | Read input, invoke the graph, and keep complete history |
+| Console loop | `chat()`, now in `console.py` | Read input, invoke the graph, and keep complete history in this historical version |
 
 ### Reading order
 
@@ -226,7 +226,7 @@ Replace JSON persistence with Python's standard `sqlite3` module. Learn tables, 
 
 The main change is in `memory.py`. No database server or ORM is needed. The file is `simple_react_agent/data/study_plans.sqlite`, anchored to the module path.
 
-### Current module organization
+### Module organization introduced in version 3
 
 Version 3 also separates graph construction from the console and renames the Markdown directory from `prompts/` to `prompt_templates/`:
 
@@ -357,6 +357,142 @@ The tests cover:
 6. Rollback on failure, connection closure, and preservation of existing records.
 7. Old JSON being ignored even when malformed; new SQLite plans persisting across restarts.
 8. Tool, graph, and Unicode console regressions.
+
+## Version 4: persistent conversations with a SQLite checkpointer
+
+### Learning goal and scope
+
+Let LangGraph manage conversation state and restore it after a process restart. Learn the roles of `MessagesState`, `SqliteSaver`, and `thread_id`. The four tools, two graph nodes, three plan fields, and study-plan CRUD stay the same.
+
+Version 3 kept the complete `messages` list in the console. Version 4 passes only new messages to a graph compiled with a checkpointer. `MessagesState` merges the messages; the checkpointer restores and saves state. The model itself does not store the history.
+
+### Component diagram
+
+Orange components are new or changed in this version. Checkpoint storage is a graph capability, not another graph node.
+
+```mermaid
+flowchart TD
+    ENTRY[main.py opens resources and assembles the app] --> Q[checkpoints.py lists saved conversation IDs]
+    DB -->|Saved IDs| Q
+    Q -->|Ordinary list| MENU[console.py chooses or names a conversation]
+    MENU --> CLI[console.py sends new message and thread_id]
+    CLI --> G[Two-node ReAct graph]
+    G <--> CP[New: SqliteSaver saves and restores graph state]
+    CP <--> DB[New: data/checkpoints.sqlite]
+    G --> M[Model node]
+    M -->|Requests tools| T[Tool node]
+    T -->|Tool results| M
+    M -->|Final answer| O[Print answer]
+    O -->|Next input| CLI
+    P[data/study_plans.sqlite] -->|Load all plans before each model call| M
+    T -->|Save or delete plan| P
+    classDef changed fill:#fff3df,stroke:#c76a00,stroke-width:2px;
+    class ENTRY,Q,MENU,CLI,CP,DB changed;
+```
+
+### What changed from version 3
+
+| Component | Change |
+|---|---|
+| `main()` | Open the conversation menu, create the model after selection, and keep `SqliteSaver.from_conn_string(...)` open around selection, graph construction, and chat |
+| `checkpoints.py` | Own `CHECKPOINTS_FILE` and `list_threads(checkpointer)`; isolate SQL and checkpoint-table details |
+| `console.py` | Own `select_thread(threads)` and `chat()`; choose from a plain list and send only new messages with the thread ID |
+| `build_graph()` | Accept a checkpointer and pass it to `graph.compile(checkpointer=...)` |
+| `prompt_templates/system_prompt.md` | Clarify that plan tools save plan fields while the application separately saves conversation history |
+| Failure handling | End the console on expected errors; continue pending work on the next launch of the same thread |
+| `tests/test_checkpoints.py` | Verify actual SQLite restoration, thread isolation, and recovery using offline models |
+| Runtime data | Add `data/checkpoints.sqlite`, covered by the existing `data/` ignore rule |
+
+The SQLite checkpointer dependency is already installed in the project. No new framework or tool is needed. `build_graph()` keeps the checkpointer optional for isolated graph tests; the console always supplies `SqliteSaver`.
+
+### Module boundaries
+
+```text
+simple_react_agent/
+├── main.py           # Startup, resource lifetime, and composition
+├── checkpoints.py   # Checkpoint path and conversation queries
+├── console.py       # Conversation menu, chat, and terminal error messages
+├── graph.py         # ReAct graph, nodes, and routing
+├── model.py         # Model creation
+├── memory.py        # Study-plan validation and storage
+├── tools.py         # Tool entry points
+├── prompts.py       # Prompt loading and formatting
+└── prompt_templates/
+```
+
+`main.py` connects the modules explicitly:
+
+```python
+threads = checkpoints.list_threads(checkpointer)
+thread_id = select_thread(threads)
+```
+
+The menu receives `list[str]` and does not depend on `SqliteSaver` or its tables. Database details stay in `checkpoints.py`, while interaction and graph-error messages stay in `console.py`. `main.py` keeps saver lifetime and startup handling. It enters the menu directly and does not parse command-line arguments. This is a version 4 refactor, not a new learning version or a database migration.
+
+### Follow one turn through the code
+
+1. `main()` opens `SqliteSaver` and shows the menu. After a conversation is selected or named, it creates the model and passes the saver to `build_graph()`. The connection stays open until chat finishes.
+2. `console.py`'s `chat()` uses `{"configurable": {"thread_id": "study-python"}, "recursion_limit": 20}` for this conversation, annotated as `RunnableConfig`.
+3. The console invokes the graph with `{"messages": [HumanMessage(text)]}`. It does not resend the full history.
+4. LangGraph loads saved state for that thread, merges the new message, and runs the existing model/tool loop. Checkpoints record execution state at step boundaries.
+5. A later invocation with the same database and thread ID restores that conversation. A different ID uses separate history.
+6. Exiting the saver context closes the connection without deleting the database.
+
+`thread_id` identifies a conversation, not an operating-system thread or user account. The startup menu uses its name as the ID. Names are case-sensitive; surrounding whitespace is stripped. New names must be nonempty and must not already exist. Select an existing conversation by its displayed number, choose `0` to create one, or enter `exit`/`quit` to leave. There is no command-line conversation selector or automatic default selection. Older IDs such as `default` still appear in the list.
+
+`checkpoints.py`'s `list_threads()` reads only distinct IDs from the existing checkpoint table, without deserializing message histories or adding a separate registry table. A fresh file with no checkpoint table returns an empty list. Newly named conversations become list entries after their first graph input is checkpointed. Menu numbers are just positions in the sorted list, not permanent IDs. Opening the menu and exiting do not create a model or require an API key.
+
+### Two stores, two purposes
+
+| File | Contents | Scope |
+|---|---|---|
+| `data/checkpoints.sqlite` | Graph state: messages, tool requests/results, and execution progress | Separate state per `thread_id` |
+| `data/study_plans.sqlite` | `project`, `minutes`, and `date` | Shared plan list across all threads in this app |
+
+The model node still reads current plans before every model call. A different conversation can see saved plans without seeing another conversation's messages. Upgrading preserves existing SQLite plans, but version 3's lost in-memory conversations cannot be recovered. Both databases are anchored to the application directory and ignored by Git.
+
+### Failed or interrupted turns
+
+Unlike versions 2 and 3, failed-turn state is not discarded. Expected API, storage, or graph-limit errors end the console session. Successfully written checkpoints remain. At the next launch, `graph.get_state(config).next` identifies pending nodes, and `graph.invoke(None, config=config)` continues the unfinished turn before accepting a new message. `None` means continue saved work, not append an empty user message.
+
+For example, if saving a plan finished and its tool result was checkpointed, but the following model call failed, restarting the same thread resumes the model call using that tool result. It does not run the completed save step again.
+
+Checkpoints and plan writes use separate transactions. A node interrupted before its completion was recorded can run again; this does not guarantee exactly-once tool side effects. Plan writes already committed are not rolled back by a later model failure. A persistent failure can be fixed before restarting, or a new thread can be used for a fresh conversation. History is not compacted, and a given thread should be used by one console process at a time.
+
+### Reading order and exercises
+
+1. Read `main()` and its `with SqliteSaver.from_conn_string(...)` lifetime.
+2. Read `list_threads()` in `checkpoints.py`, then `select_thread(threads)` in `console.py`, to understand how a plain list becomes a selected `thread_id`.
+3. Read the checkpointer parameter and `compile()` call in `graph.py`.
+4. Read `console.py`'s `chat()` config and new-message input; compare with manual history management from version 3.
+5. Read the pending-state check and `invoke(None, ...)` recovery branch.
+6. Read `tests/test_checkpoints.py` to see recovery without real model calls.
+
+Try:
+
+```bash
+uv run simple-react-agent
+```
+
+Choose `0` and name a conversation `study-python`. Tell it "I want to learn decorators," exit, run the same command, select the saved conversation by number, and ask what you wanted to learn. Then create `study-english` from the menu and check that its conversation is separate. Save a plan in either conversation and verify it is visible in the other. Try invalid menu choices, blank names, and duplicate names; existing data should remain unchanged.
+
+Offline checks:
+
+```bash
+uv run pytest -q src/agent_apps/simple_react_agent/tests
+```
+
+Tests cover cross-process restoration of messages and tool results, thread isolation, shared plans, no duplicate messages, recovery after a model failure without repeating a completed save, saver connection closure, menu selection, blank/duplicate names, quitting without an API key, database errors, and existing CRUD/console regressions. Unicode editing is verified in both conversation naming and chat input.
+
+### Self-check
+
+- Why does an in-memory checkpointer lose history after the process exits, while `SqliteSaver` retains it?
+- Why does each turn now send only the new message?
+- Why are both the same database and the same `thread_id` needed to restore a conversation?
+- Why can two threads share plans while keeping different message histories?
+- Why must unfinished tool/model work be resumed before adding a new user message?
+
+See the official [LangGraph persistence guide](https://docs.langchain.com/oss/python/langgraph/persistence) and [SqliteSaver reference](https://reference.langchain.com/python/langgraph.checkpoint.sqlite/SqliteSaver/from_conn_string) for the underlying APIs.
 
 ## Recording future versions
 

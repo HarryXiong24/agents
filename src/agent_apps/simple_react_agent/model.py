@@ -6,6 +6,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from langchain_core.language_models import BaseChatModel
 from langchain_groq import ChatGroq
+from pydantic import SecretStr
 
 
 def create_model() -> BaseChatModel:
@@ -18,7 +19,7 @@ def create_model() -> BaseChatModel:
 
     return ChatGroq(
         model=os.getenv("AGENT_MODEL") or "openai/gpt-oss-20b",
-        api_key=api_key,
+        api_key=SecretStr(api_key),
         base_url=os.getenv("GROQ_BASE_URL") or "https://api.groq.com",
         temperature=0,
         timeout=30,

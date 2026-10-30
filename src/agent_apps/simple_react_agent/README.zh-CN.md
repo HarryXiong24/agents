@@ -4,9 +4,9 @@
 
 代码注释、提示词、工具说明与终端文案统一使用英文；助手默认用英文回答，用户明确要求时可以使用其他语言。
 
-这是用于逐块学习的智能体，目前是第三版：普通终端对话、四个本地工具、两个图节点、内存会话历史，以及可保存、更新和删除学习计划的 SQLite 数据库。每条计划只有项目、学习时长、日期三个属性。
+这是用于逐块学习的智能体，目前是第四版：普通终端对话、四个本地工具、两个图节点、SQLite 会话检查点，以及可保存、更新和删除学习计划的 SQLite 数据库。每条计划只有项目、学习时长、日期三个属性。
 
-每个版本的学习过程、结构图和新增组件统一记录在 [版本学习路线](docs/VERSIONS.zh-CN.md)。第三版使用全新的 SQLite 存储，保留第二版的增删改查接口，从空计划列表开始。
+每个版本的学习过程、结构图和新增组件统一记录在 [版本学习路线](docs/VERSIONS.zh-CN.md)。第四版增加可跨重启恢复的会话，学习计划增删改查保持原样，不导入旧 JSON。
 
 ## 启动
 
@@ -24,11 +24,26 @@ GROQ_BASE_URL=https://api.groq.com
 uv run simple-react-agent
 ```
 
+每次启动都会先进入会话列表：
+
+```text
+Conversations
+1. study-english
+2. study-python
+0. New conversation
+Type 'exit' to quit.
+Choose a conversation:
+```
+
+输入已有会话的编号即可继续；输入 `0` 并填写名称即可新建。新会话在发送第一条消息后保存，未发送消息就退出不会产生历史条目。首次启动列表为空，查看菜单和退出不需要 API Key。
+
 如果已经激活并安装了项目的虚拟环境，也可以运行：
 
 ```bash
 python -m agent_apps.simple_react_agent
 ```
+
+模块入口也进入同一个菜单。会话名称作为内部 `thread_id`，区分大小写，首尾空白会被移除；新建时拒绝空名称和已有名称。旧的 `default` 等会话仍可从列表选择，不再自动进入默认会话，也不再支持命令行指定会话。
 
 输入 `exit` 或 `quit`（不区分大小写），或按下键盘中断组合键结束。启动时已有的环境变量优先于 `.env`。
 
@@ -73,8 +88,8 @@ Assistant: That is 315 minutes, or 5.25 hours.
 2. 读 `model.py` 的 `create_model()`：配置和密钥怎样用于创建模型。
 3. 读 `memory.py` 和 `prompts.py`：学习计划怎样写入数据库、查询，再进入系统提示词。
 4. 读 `graph.py` 的 `build_graph()`：模型节点决定下一步，工具节点执行操作，条件边决定继续还是结束。
-5. 读 `main.py` 的 `chat()`：用户输入怎样变成消息，图返回的完整历史怎样交给下一轮。
-6. 最后看 `main()` 和 `__main__.py`，把启动过程连起来。
+5. 读 `checkpoints.py` 和 `console.py`：存储层怎样返回会话名称列表，菜单怎样选择，以及 `chat()` 怎样将新消息和对应的 `thread_id` 交给图。
+6. 最后看 `main()` 和 `__main__.py`：启动过程以及 `SqliteSaver` 的连接生命周期。
 
 核心流程只有一条循环：
 
@@ -88,7 +103,15 @@ Assistant: That is 315 minutes, or 5.25 hours.
 
 模型通常可以根据对话选择工具，但不保证每次都遵循提示词。观察程序实际打印的工具提示，可以确认是否执行了工具；程序不会展示模型的内部推理。
 
-## 第三版：SQLite 学习计划存储
+## 第四版：对话历史持久化
+
+运行 `uv run simple-react-agent`，选择 `0`，命名为 `study-python`，告诉助手“我想学习装饰器”，然后退出。再次启动，按列表中显示的编号选择 `study-python`，询问“我刚才想学习什么？”。图会根据该会话的 `thread_id` 从 `data/checkpoints.sqlite` 恢复消息。
+
+新建 `study-english` 会使用另一段独立的历史。每次启动都由菜单选择，不需要记住或传入 ID。编号只是本次菜单的位置，会话名称才是数据库中稳定的标识。
+
+终端每轮只传入新的 `HumanMessage`。`MessagesState` 将它与恢复后的状态合并，Checkpointer 保存用户消息、模型回复、工具请求和工具结果，不增加图节点或工具。
+
+## SQLite 学习计划存储（第三版引入）
 
 ```text
 输入：保存学习计划：2026年10月29日，学习Python，时长60分钟。
@@ -114,9 +137,9 @@ You: exit
 
 第一次查询或写入时自动创建数据库，路径相对于 `memory.py` 固定，已加入忽略规则。使用 Python 自带的 `sqlite3`，不需要安装数据库服务。每次操作使用独立连接，退出上下文后提交或回滚，并关闭连接。
 
-## 第三版从空数据库开始
+## 数据库初始化
 
-首次访问时只创建空表，历史 JSON 不读取、不导入。第三版新保存的计划会持续保存在 SQLite 中，重新启动后仍能读取，不会每次启动清空数据库。
+学习计划首次访问时创建空表，历史 JSON 不读取、不导入。升级到第四版会保留已有 SQLite 计划。检查点数据库从第四版开始记录会话，不能找回第三版曾经只存在于内存中的对话。
 
 ## 删除学习计划
 
@@ -132,7 +155,9 @@ Tool: Deleted study plan: Python, 2026-10-29.
 
 ```text
 simple_react_agent/
-├── main.py                       # 终端启动与输入输出
+├── main.py                       # 启动、资源生命周期与组装
+├── checkpoints.py               # 检查点路径与已有会话查询
+├── console.py                   # 会话菜单、聊天与终端错误提示
 ├── graph.py                      # 图构建、节点和路由
 ├── prompts.py                    # 读取模板、填入计划数据
 └── prompt_templates/            # 只存放 Markdown，不放 __init__.py
@@ -142,11 +167,15 @@ simple_react_agent/
 
 修改助手行为时编辑对应 `.md` 文件；`prompts.py` 使用 UTF-8 读取它们，再将计划数据填入模板。模板在模块导入时读取，编辑后重新启动程序生效。简短的工具错误提示保留为 `prompts.py` 中的 `TOOL_ERROR_MESSAGE` 字符串。文件名使用小写，Python 常量名使用大写，二者没有必须一致的要求。`graph.py` 通过 `from .prompts import ...` 使用统一入口，`main.py` 从 `graph.py` 导入 `build_graph()`。
 
+`main.py` 打开 Saver，通过 `threads = checkpoints.list_threads(checkpointer)` 获取普通列表，再交给 `console.py` 的 `select_thread(threads)`。菜单不访问数据库；`checkpoints.py` 集中管理 `CHECKPOINTS_FILE` 和会话查询 SQL，`console.py` 管理 `select_thread()` 和 `chat()`。入口直接进入会话列表，不解析命令行参数。
+
 ## 两种记忆怎样配合
 
-`messages` 是终端循环里的一个列表，保存用户消息、模型回复、工具调用和工具结果。每次调用图时传入完整列表，成功后使用图返回的完整列表替换它。
+`data/checkpoints.sqlite` 按 `thread_id` 保存图状态，包括对话历史和执行进度。`data/study_plans.sqlite` 保存三字段学习计划。不同会话的聊天历史独立，但共用同一份学习计划；会话 ID 不是用户账号。
 
-这里没有检查点。重启程序后对话历史清空；明确保存的学习计划仍保留在 SQLite 中。历史尚未压缩，对话过长时可退出并重新启动。单轮执行设有简单的图步数上限，出错时保留此前成功完成的对话。已经提交的计划操作不会因后续模型请求失败而回滚。
+两个文件都能跨重启保留，且已被 Git 忽略。历史尚未压缩，想开始新对话时在启动菜单选择 `0`。同一会话一次运行一个终端进程。
+
+遇到预期的图、API 或存储错误时，程序结束本次终端会话，保留已经成功写入的检查点。重启后通过 `get_state(config).next` 判断是否有未完成步骤，先用 `invoke(None, config)` 继续，再接受新输入。已经记录完成的步骤会复用；节点中断时若尚未保存结果，可能重新执行该节点。检查点和计划写入属于独立事务，因此不保证工具副作用严格只执行一次。后续模型失败也不会回滚已提交的计划。
 
 计算器使用浮点数，适合学习时长等日常计算，不作为精确金额计算工具。
 
@@ -154,7 +183,7 @@ simple_react_agent/
 
 先试着新增“分钟转小时”的本地工具，并把它放进 `TOOLS`。观察为什么不必修改图的连线。
 
-第三版继续使用 `memory.py` 和原有计划保存、删除工具。先按 [版本学习路线](docs/VERSIONS.zh-CN.md) 阅读联合主键、SQL 参数和事务，验证原有行为，当前只保留三个属性。
+按 [版本学习路线](docs/VERSIONS.zh-CN.md) 阅读第四版的 `SqliteSaver`、`thread_id`、状态恢复和两种记忆分工；学习计划仍只保留原来的三个属性。
 
 ## 离线验证
 
@@ -164,4 +193,4 @@ simple_react_agent/
 uv run pytest -q src/agent_apps/simple_react_agent/tests
 ```
 
-测试使用模拟模型，不调用真实模型接口，不需要密钥。
+测试使用模拟模型和临时数据库，不调用真实模型接口，不需要密钥或网络。覆盖跨进程会话恢复、会话隔离、失败恢复、学习计划增删改查，以及中文输入和存储。

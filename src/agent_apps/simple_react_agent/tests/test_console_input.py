@@ -23,13 +23,15 @@ def test_backspace_can_delete_first_chinese_character(typed, expected):
     code = """
 from types import SimpleNamespace
 from langchain_core.messages import AIMessage
-from agent_apps.simple_react_agent.main import chat
+from agent_apps.simple_react_agent.console import chat, select_thread
 
 def echo(state, config):
     text = state["messages"][-1].content
     return {"messages": [AIMessage(content="Echo: " + text)]}
 
-chat(SimpleNamespace(invoke=echo))
+thread = select_thread([])
+if thread is not None:
+    chat(SimpleNamespace(invoke=echo, get_state=lambda _: SimpleNamespace(next=())), thread)
 """
     process = subprocess.Popen(
         [sys.executable, "-u", "-c", code],
@@ -53,7 +55,12 @@ chat(SimpleNamespace(invoke=echo))
         return output.decode("utf-8")
 
     try:
-        read_until(b"You: ")
+        read_until(b"Choose a conversation: ")
+        os.write(master, b"0\n")
+        read_until(b"New conversation name (or 'exit' to quit): ")
+        os.write(master, (typed + "\n").encode())
+        startup = read_until(b"You: ")
+        assert f"Conversation: {expected}." in startup
         # DEL represents Backspace; submit the replacement text, then exit normally.
         os.write(master, (typed + "\nexit\n").encode())
         output = read_until(b"Assistant: Goodbye!")

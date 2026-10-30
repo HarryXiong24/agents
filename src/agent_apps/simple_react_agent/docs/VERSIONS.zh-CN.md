@@ -6,7 +6,7 @@
 
 这份文档专门记录每个版本学什么、增加什么、怎样验证。后续增加功能时，继续在这里追加对应版本。
 
-当前运行代码是第三版，已使用 SQLite。第一版与第二版记录用于回顾演进过程；版本表示学习阶段，并不是互相独立的运行目录。
+当前运行代码是第四版，对话检查点和学习计划都使用 SQLite。第一至第三版记录用于回顾演进过程，并不是互相独立的运行目录。旧版 JSON 存储和终端手动管理消息列表的说明属于历史实现；阅读当前对话代码时请对照第四版。
 
 图中既包含程序组件，也包含数据流；真正注册到 LangGraph 的节点始终只有“模型节点”和“工具节点”。文件读写函数和终端循环都不是额外的图节点。
 
@@ -37,7 +37,7 @@ flowchart TD
 | 模型节点 | `graph.py` 的 `call_model()` | 把提示词和消息交给模型，返回状态更新 |
 | 工具节点 | `graph.py` 的 `ToolNode` | 执行模型请求，生成工具结果消息 |
 | 条件路由 | `route_after_model()` | 有工具调用就执行，没有就结束本轮 |
-| 终端循环 | `chat()` | 接收输入、运行图、保存返回的完整历史 |
+| 终端循环 | `chat()`，现位于 `console.py` | 接收输入、运行图；历史版本由终端保存返回的完整历史 |
 
 ### 推荐阅读顺序
 
@@ -228,7 +228,7 @@ flowchart TD
 
 这次主要改 `memory.py`，不用增加数据库服务或 ORM。SQLite 数据库保存在 `simple_react_agent/data/study_plans.sqlite`，路径仍根据模块位置确定。
 
-### 当前模块布局
+### 第三版引入的模块布局
 
 第三版还将图构建从终端入口中拆出，并把 Markdown 目录从 `prompts/` 改名为 `prompt_templates/`：
 
@@ -359,6 +359,142 @@ SQLite 连接与事务上下文的行为参考 [Python sqlite3 文档](https://d
 6. 写入失败时事务回滚，数据库连接正常关闭，原有记录保留。
 7. 即使旧 JSON 存在或已损坏，也不会读取它；数据库从空列表开始，新保存的计划重启后保留。
 8. 表中只有三个业务字段，工具、图和终端中文退格回归继续通过。
+
+## 第四版：SQLite Checkpointer 保存对话状态
+
+### 学习目标与范围
+
+将对话状态交给 LangGraph 管理，并在进程重启后恢复。理解 `MessagesState`、`SqliteSaver` 和 `thread_id` 的分工。四个工具、两个图节点、三个计划字段以及学习计划增删改查保持不变。
+
+第三版由终端保管完整的 `messages` 列表。第四版只把新消息交给带有 Checkpointer 的图：`MessagesState` 负责消息合并，Checkpointer 负责恢复和保存状态。并不是模型自己保存了历史。
+
+### 组件结构图
+
+橙色部分表示本版新增或修改的组件。检查点存储是图的能力，不是额外的图节点。
+
+```mermaid
+flowchart TD
+    ENTRY[main.py 打开资源并组装应用] --> Q[checkpoints.py 查询已保存的会话 ID]
+    DB -->|已有 ID| Q
+    Q -->|普通列表| MENU[console.py 选择或命名会话]
+    MENU --> CLI[console.py 传入新消息和 thread_id]
+    CLI --> G[两节点 ReAct 图]
+    G <--> CP[新增：SqliteSaver 保存与恢复图状态]
+    CP <--> DB[新增：data/checkpoints.sqlite]
+    G --> M[模型节点]
+    M -->|提出工具调用| T[工具节点]
+    T -->|工具结果| M
+    M -->|最终回答| O[终端输出]
+    O -->|下一次输入| CLI
+    P[data/study_plans.sqlite] -->|每次模型调用前读取全部计划| M
+    T -->|保存或删除计划| P
+    classDef changed fill:#fff3df,stroke:#c76a00,stroke-width:2px;
+    class ENTRY,Q,MENU,CLI,CP,DB changed;
+```
+
+### 相比第三版改变了什么
+
+| 组件 | 改动 |
+|---|---|
+| `main()` | 启动会话列表，选择后再创建模型，用 `SqliteSaver.from_conn_string(...)` 包住菜单、图构建和整个对话过程 |
+| `checkpoints.py` | 管理 `CHECKPOINTS_FILE` 与 `list_threads(checkpointer)`，集中保存查询 SQL 和检查点表细节 |
+| `console.py` | 管理 `select_thread(threads)` 和 `chat()`，根据普通列表选择会话，每轮只传入新消息和会话 ID |
+| `build_graph()` | 接收 Checkpointer，并传给 `graph.compile(checkpointer=...)` |
+| `prompt_templates/system_prompt.md` | 说明计划工具只保存计划字段，对话历史由应用另行保存 |
+| 失败处理 | 遇到预期错误时结束本次终端会话，下次启动同一会话时继续未完成步骤 |
+| `tests/test_checkpoints.py` | 使用离线模型验证真正的 SQLite 恢复、会话隔离和失败恢复 |
+| 运行数据 | 新增 `data/checkpoints.sqlite`，沿用已有的 `data/` 忽略规则 |
+
+项目已有 SQLite Checkpointer 依赖，不需要增加框架或工具。`build_graph()` 保留可选 Checkpointer，方便单独测试图；终端入口始终传入 `SqliteSaver`。
+
+### 模块职责分层
+
+```text
+simple_react_agent/
+├── main.py           # 启动、资源生命周期与组装
+├── checkpoints.py   # 检查点路径与会话查询
+├── console.py       # 会话菜单、聊天与终端错误提示
+├── graph.py         # ReAct 图、节点与路由
+├── model.py         # 模型创建
+├── memory.py        # 学习计划校验与存储
+├── tools.py         # 工具入口
+├── prompts.py       # 提示词加载与组装
+└── prompt_templates/
+```
+
+`main.py` 显式连接存储与终端模块：
+
+```python
+threads = checkpoints.list_threads(checkpointer)
+thread_id = select_thread(threads)
+```
+
+菜单接收 `list[str]`，不依赖 `SqliteSaver` 或它的表结构；数据库细节留在 `checkpoints.py`，交互和图执行错误提示放在 `console.py`。`main.py` 保留 Saver 生命周期与启动处理。入口直接显示菜单，不解析命令行参数。这是第四版内部的分层调整，不增加新版本，也不迁移数据库。
+
+### 跟踪一次对话
+
+1. `main()` 打开 `SqliteSaver` 并显示菜单；选好已有会话或命名新会话后，再创建模型并将 Saver 传给 `build_graph()`，连接一直保持到终端对话结束。
+2. `console.py` 的 `chat()` 为当前会话使用 `{"configurable": {"thread_id": "study-python"}, "recursion_limit": 20}`，并用 `RunnableConfig` 标注类型。
+3. 终端通过 `{"messages": [HumanMessage(text)]}` 调用图，不再重复发送完整历史。
+4. LangGraph 读取对应会话的状态，合并新消息，执行原来的模型与工具循环，在执行步骤之间记录检查点。
+5. 下次连接相同数据库并使用相同会话 ID，就能恢复这段对话；不同 ID 使用各自的历史。
+6. 退出 Saver 的 `with` 上下文会关闭连接，不会删除数据库。
+
+`thread_id` 表示一段会话，不是操作系统线程，也不是用户账号。启动菜单将会话名称作为 ID，区分大小写，移除首尾空白；新名称不能为空或与已有名称相同。输入编号选择已有会话，输入 `0` 新建，输入 `exit` 或 `quit` 退出。不再通过命令行指定会话，也不自动进入默认会话；旧的 `default` 等 ID 仍会出现在列表中。
+
+`checkpoints.py` 的 `list_threads()` 只从现有检查点表查询不重复的 ID，不反序列化完整聊天历史，也不新增会话登记表。新数据库尚未建表时返回空列表；新命名的会话在第一条图输入写入检查点后才出现在历史列表。编号只是排序后列表的位置，不是永久 ID。打开菜单或直接退出不创建模型，也不需要 API Key。
+
+### 两种存储的分工
+
+| 文件 | 保存内容 | 范围 |
+|---|---|---|
+| `data/checkpoints.sqlite` | 图状态：消息、工具请求与结果、执行进度 | 按 `thread_id` 分别保存 |
+| `data/study_plans.sqlite` | 项目、分钟数、日期三个字段 | 应用中的所有会话共用一份计划列表 |
+
+模型节点仍在每次请求前读取最新计划。另一段会话可以知道已保存的计划，但不会因此获得其他会话的聊天记录。升级保留已有 SQLite 计划，无法找回第三版已经随进程退出而丢失的对话。两个数据库都相对于应用目录固定，且不会提交到 Git。
+
+### 失败或中断的对话
+
+与第二、第三版不同，失败轮次的状态不再直接丢弃。遇到预期的 API、存储错误或图步数上限时，结束本次终端会话，保留成功写入的检查点。下次启动时，`graph.get_state(config).next` 判断是否存在待执行节点，通过 `graph.invoke(None, config=config)` 先继续未完成的轮次，再接受新消息。这里的 `None` 表示继续已有进度，不是追加一条空的用户消息。
+
+例如保存计划已完成、工具结果也已写入检查点，随后模型请求失败：重新启动同一会话时，会使用已有工具结果继续模型请求，不会再次执行已经完成的保存步骤。
+
+检查点和计划写入属于独立事务。节点完成状态尚未记录就被中断时，该节点可能再次执行，因此不保证工具副作用严格只发生一次。已提交的计划不会因后续模型失败而回滚。持续失败时，可以先修复原因再重启，也可以使用新的会话 ID 开始新对话。暂不压缩历史，同一会话一次只运行一个终端进程。
+
+### 阅读顺序与动手验证
+
+1. 先看 `main()` 中 `with SqliteSaver.from_conn_string(...)` 的生命周期。
+2. 看 `checkpoints.py` 的 `list_threads()`，再看 `console.py` 的 `select_thread(threads)`，理解普通列表怎样变成选中的 `thread_id`。
+3. 看 `graph.py` 的 Checkpointer 参数与 `compile()`。
+4. 看 `console.py` 中 `chat()` 的配置和新消息输入，对照第三版手动管理历史的方式。
+5. 看待执行状态判断与 `invoke(None, ...)` 的恢复分支。
+6. 看 `tests/test_checkpoints.py`，理解怎样不用真实模型验证恢复。
+
+运行：
+
+```bash
+uv run simple-react-agent
+```
+
+选择 `0`，命名为 `study-python`，告诉助手“我想学习装饰器”；退出后重新运行同一命令，按编号选择已有会话，再问“我刚才想学什么？”。然后从菜单新建 `study-english`，确认聊天历史独立。在任一会话保存一条学习计划，检查另一会话仍能读取。再尝试非法编号、空名称、重复名称，确认原有数据不受影响。
+
+离线检查：
+
+```bash
+uv run pytest -q src/agent_apps/simple_react_agent/tests
+```
+
+测试覆盖跨进程恢复消息和工具结果、会话隔离、共享计划、消息不重复、模型失败后恢复且不重复已完成保存、Saver 关闭连接、菜单选择、空名称与重名、无需密钥退出、数据库错误，以及既有计划增删改查和终端回归。会话命名和聊天输入都验证了中文退格编辑。
+
+### 学完后的自查
+
+- 为什么内存 Checkpointer 随进程退出而丢失，而 `SqliteSaver` 可以保留历史？
+- 为什么每轮只需要传入新消息？
+- 为什么恢复会话必须同时使用相同数据库和 `thread_id`？
+- 为什么两段会话的计划可以共享，聊天历史却不同？
+- 为什么要先继续未完成的工具或模型步骤，再追加新的用户消息？
+
+底层 API 可参考官方 [LangGraph 持久化指南](https://docs.langchain.com/oss/python/langgraph/persistence)和 [SqliteSaver 文档](https://reference.langchain.com/python/langgraph.checkpoint.sqlite/SqliteSaver/from_conn_string)。
 
 ## 后续版本怎样继续记录
 

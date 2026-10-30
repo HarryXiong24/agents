@@ -10,10 +10,12 @@ import pytest
 from groq import APIConnectionError
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.errors import GraphRecursionError
 
+from agent_apps.simple_react_agent import checkpoints, console, memory
 from agent_apps.simple_react_agent import main as app
-from agent_apps.simple_react_agent import memory
 from agent_apps.simple_react_agent import model as model_config
 from agent_apps.simple_react_agent.graph import build_graph
 from agent_apps.simple_react_agent.tools import (
@@ -29,6 +31,21 @@ def isolate_plans(tmp_path, monkeypatch):
     monkeypatch.setattr(
         memory, "DATABASE_FILE", tmp_path / "data" / "study_plans.sqlite"
     )
+    monkeypatch.setattr(
+        checkpoints, "CHECKPOINTS_FILE", tmp_path / "data" / "checkpoints.sqlite"
+    )
+
+
+@pytest.fixture
+def checkpointer(tmp_path):
+    with SqliteSaver.from_conn_string(str(tmp_path / "checkpoints.sqlite")) as saver:
+        yield saver
+
+
+def make_idle_graph():
+    graph = Mock()
+    graph.get_state.return_value.next = ()
+    return graph
 
 
 def make_model(*responses):
@@ -138,13 +155,13 @@ def test_tool_validation_error_returns_to_model():
     assert model.invoke.call_count == 2
 
 
-def test_console_keeps_history_without_duplicates(monkeypatch, capsys):
+def test_console_keeps_history_without_duplicates(monkeypatch, capsys, checkpointer):
     model = make_model(
         AIMessage(content="Got it."), AIMessage(content="That is 210 minutes per week.")
     )
     inputs = iter(["", "I study 30 minutes per day", "What about a week?", "exit"])
     monkeypatch.setattr("builtins.input", lambda _: next(inputs))
-    app.chat(build_graph(model))
+    console.chat(build_graph(model, checkpointer=checkpointer))
     second_request = model.invoke.call_args_list[1].args[0]
     assert [m.content for m in second_request[1:]] == [
         "I study 30 minutes per day",
@@ -154,7 +171,9 @@ def test_console_keeps_history_without_duplicates(monkeypatch, capsys):
     assert "210 minutes per week" in capsys.readouterr().out
 
 
-def test_console_discards_failed_turn(monkeypatch, capsys):
+def test_console_keeps_failed_turn_and_resumes_before_new_input(
+    monkeypatch, capsys, checkpointer
+):
     model = make_model(
         AIMessage(content="Got it."),
         APIConnectionError(
@@ -163,12 +182,27 @@ def test_console_discards_failed_turn(monkeypatch, capsys):
         ),
         AIMessage(content="Let us continue."),
     )
-    inputs = iter(["First turn", "Failed turn", "Retry", "exit"])
+    inputs = iter(["First turn", "Failed turn"])
     monkeypatch.setattr("builtins.input", lambda _: next(inputs))
-    app.chat(build_graph(model))
+    graph = build_graph(model, checkpointer=checkpointer)
+    console.chat(graph)
+    assert model.invoke.call_count == 2
+    config: RunnableConfig = {"configurable": {"thread_id": "default"}}
+    assert graph.get_state(config).next == ("model",)
+
+    # Restarting the console finishes the saved turn before asking for new input.
+    monkeypatch.setattr("builtins.input", lambda _: "exit")
+    console.chat(graph)
     third_request = model.invoke.call_args_list[2].args[0]
-    assert [m.content for m in third_request[1:]] == ["First turn", "Got it.", "Retry"]
-    assert "This turn failed" in capsys.readouterr().out
+    assert [m.content for m in third_request[1:]] == [
+        "First turn",
+        "Got it.",
+        "Failed turn",
+    ]
+    assert graph.get_state(config).next == ()
+    output = capsys.readouterr().out
+    assert "This turn failed" in output
+    assert "Resuming the unfinished turn" in output
 
 
 @pytest.mark.parametrize(
@@ -180,23 +214,24 @@ def test_console_discards_failed_turn(monkeypatch, capsys):
     ],
 )
 def test_console_handles_expected_data_errors(monkeypatch, capsys, error):
-    graph = Mock()
+    graph = make_idle_graph()
     graph.invoke.side_effect = error
     inputs = iter(["Please read my plans", "exit"])
     monkeypatch.setattr("builtins.input", lambda _: next(inputs))
-    app.chat(graph)
+    console.chat(graph)
     assert "Check the study plan file or your input" in capsys.readouterr().out
 
 
 def test_console_propagates_unexpected_error(monkeypatch):
-    graph = Mock()
+    graph = make_idle_graph()
     graph.invoke.side_effect = RuntimeError("Simulated programming error")
     monkeypatch.setattr("builtins.input", lambda _: "Hello")
     with pytest.raises(RuntimeError, match="programming error"):
-        app.chat(graph)
+        console.chat(graph)
 
 
 def test_startup_explains_configuration_error(monkeypatch):
+    monkeypatch.setattr(app, "select_thread", lambda _: "test")
     monkeypatch.setattr(
         app, "create_model", Mock(side_effect=ValueError("Missing API key"))
     )
@@ -205,6 +240,7 @@ def test_startup_explains_configuration_error(monkeypatch):
 
 
 def test_startup_propagates_graph_construction_error(monkeypatch):
+    monkeypatch.setattr(app, "select_thread", lambda _: "test")
     monkeypatch.setattr(app, "create_model", Mock(return_value=Mock()))
     monkeypatch.setattr(
         app, "build_graph", Mock(side_effect=ValueError("Simulated graph wiring error"))
@@ -214,11 +250,11 @@ def test_startup_propagates_graph_construction_error(monkeypatch):
 
 
 def test_console_explains_step_limit(monkeypatch, capsys):
-    graph = Mock()
+    graph = make_idle_graph()
     graph.invoke.side_effect = GraphRecursionError("Simulated step limit")
     inputs = iter(["Repeated calls", "exit"])
     monkeypatch.setattr("builtins.input", lambda _: next(inputs))
-    app.chat(graph)
+    console.chat(graph)
     assert "Too many tool steps" in capsys.readouterr().out
 
 
@@ -425,11 +461,11 @@ def test_delete_tool_reports_missing_plan(capsys):
 
 
 def test_console_explains_database_error(monkeypatch, capsys):
-    graph = Mock()
+    graph = make_idle_graph()
     graph.invoke.side_effect = sqlite3.OperationalError("Simulated unwritable database")
     inputs = iter(["Query plans", "exit"])
     monkeypatch.setattr("builtins.input", lambda _: next(inputs))
-    app.chat(graph)
+    console.chat(graph)
     assert "Database operation failed" in capsys.readouterr().out
 
 
