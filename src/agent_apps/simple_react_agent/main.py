@@ -5,6 +5,7 @@ import sqlite3
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from . import checkpoints
+from .config import load_summary_config
 from .console import chat, select_thread
 from .graph import build_graph
 from .model import create_model
@@ -27,11 +28,14 @@ def main() -> None:
             # Browsing the menu and exiting do not need a model or an API key.
             try:
                 model = create_model()
+                summary_config = load_summary_config()
             except (OSError, ValueError) as exc:
                 raise SystemExit(f"Startup failed: {exc}") from exc
 
             # init graph
-            graph = build_graph(model, checkpointer=checkpointer)
+            graph = build_graph(
+                model, checkpointer=checkpointer, summary_config=summary_config
+            )
             # begin chat
             chat(graph, thread_id=thread_id)
     except (EOFError, KeyboardInterrupt):

@@ -14,7 +14,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.errors import GraphRecursionError
 
-from agent_apps.simple_react_agent import checkpoints, console, memory
+from agent_apps.simple_react_agent import checkpoints, config, console, memory
 from agent_apps.simple_react_agent import main as app
 from agent_apps.simple_react_agent import model as model_config
 from agent_apps.simple_react_agent.graph import build_graph
@@ -34,6 +34,7 @@ def isolate_plans(tmp_path, monkeypatch):
     monkeypatch.setattr(
         checkpoints, "CHECKPOINTS_FILE", tmp_path / "data" / "checkpoints.sqlite"
     )
+    monkeypatch.setattr(config, "ENV_FILE", tmp_path / ".env")
 
 
 @pytest.fixture
@@ -45,6 +46,7 @@ def checkpointer(tmp_path):
 def make_idle_graph():
     graph = Mock()
     graph.get_state.return_value.next = ()
+    graph.get_state.return_value.values = {}
     return graph
 
 
@@ -259,7 +261,6 @@ def test_console_explains_step_limit(monkeypatch, capsys):
 
 
 def test_missing_api_key_has_english_error(monkeypatch):
-    monkeypatch.setattr(model_config, "load_dotenv", lambda _: None)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     with pytest.raises(ValueError, match="Set GROQ_API_KEY"):
         model_config.create_model()

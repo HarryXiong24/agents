@@ -31,7 +31,7 @@ def echo(state, config):
 
 thread = select_thread([])
 if thread is not None:
-    chat(SimpleNamespace(invoke=echo, get_state=lambda _: SimpleNamespace(next=())), thread)
+    chat(SimpleNamespace(invoke=echo, get_state=lambda _: SimpleNamespace(next=(), values={})), thread)
 """
     process = subprocess.Popen(
         [sys.executable, "-u", "-c", code],

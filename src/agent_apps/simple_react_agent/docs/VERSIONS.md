@@ -4,11 +4,11 @@ English | [简体中文](VERSIONS.zh-CN.md)
 
 This document records what each version teaches, what it adds, and how to verify it. Append the same information when a future version adds another building block.
 
-The running code is **version 4**, using SQLite for both conversation checkpoints and study plans. Versions 1 through 3 describe the learning history, not separate runnable directories. Earlier JSON storage and manual message-list management are historical; follow version 4 when reading the current conversation code.
+The running code is **version 5**, adding rolling summaries to SQLite-backed conversations and study plans. Versions 1 through 4 describe the learning history, not separate runnable directories. Follow version 5 when reading the current context-management code.
 
 Code, prompts, tool descriptions, and terminal messages use English. The assistant replies in English by default, with another language available on explicit request. Exit with `exit` or `quit`.
 
-Diagrams show both components and data flow. Only **Model node** and **Tool node** are registered LangGraph nodes; storage helpers and the console are ordinary Python functions.
+Diagrams show components and data flow. Versions 1-4 have **Model node** and **Tool node**; version 5 adds **Summary node**. Storage helpers and the console are ordinary Python functions.
 
 ## Version 1: console chat and minimal ReAct
 
@@ -493,6 +493,121 @@ Tests cover cross-process restoration of messages and tool results, thread isola
 - Why must unfinished tool/model work be resumed before adding a new user message?
 
 See the official [LangGraph persistence guide](https://docs.langchain.com/oss/python/langgraph/persistence) and [SqliteSaver reference](https://reference.langchain.com/python/langgraph.checkpoint.sqlite/SqliteSaver/from_conn_string) for the underlying APIs.
+
+## Version 5: rolling conversation summaries
+
+### Learning goal and scope
+
+Distinguish saved checkpoints, the current graph state, and the context sent to the model. Compress older completed conversations into a rolling summary while keeping recent turns verbatim. The conversation menu, SQLite saver, four tools, and three-field study plans remain unchanged. The earlier execution-budget proposal is not part of this version.
+
+### Component diagram
+
+Orange components are new or changed. There are now three registered nodes: summarize, model, and tools.
+
+```mermaid
+flowchart TD
+    C[Console sends a new user message] --> S[New: Summary node]
+    CFG[New: SUMMARY_TRIGGER_TOKENS default 500] --> S
+    S -->|Below threshold or no older completed turns| M[Model node]
+    S -->|Generate and validate summary| U[New: summary plus RemoveMessage update]
+    U --> M
+    M -->|Tool requests| T[Tool node]
+    T -->|Results within the same turn| M
+    M -->|Final answer| E[END]
+    CP[SQLite Checkpointer] <-->|Summary and recent messages| S
+    P[Current study-plan database] -->|Read before each response-model call| M
+    SP[New: summary_prompt.md and unbound base model] --> S
+    classDef changed fill:#fff3df,stroke:#c76a00,stroke-width:2px;
+    class S,CFG,U,SP changed;
+```
+
+The update box is ordinary node logic, not a fourth graph node. The tools-to-model edge bypasses summarization, preserving the current tool chain.
+
+### Configuration
+
+In this agent's own `src/agent_apps/simple_react_agent/.env`, beside `config.py`:
+
+```dotenv
+SUMMARY_TRIGGER_TOKENS=500
+```
+
+`config.py` defines the absolute `ENV_FILE` path, `read_env()`, `SummaryConfig`, and summary-setting parsing/validation. The reader uses `dotenv_values(..., interpolate=False)` on that file only. It does not search parent directories, read same-named process variables, or modify `os.environ`. Both `create_model()` and `load_summary_config()` use this reader independently, so loading one does not prepare the other's settings. `main()` passes `SummaryConfig` into `build_graph()`. An absent trigger uses the configuration class default; an explicit invalid value produces a startup error. Restart after changes. Programmatic callers can pass `summary_config=SummaryConfig(trigger_tokens=500)` directly to `build_graph()`.
+
+The local `.env` contains `GROQ_API_KEY`, `AGENT_MODEL`, `GROQ_BASE_URL`, and `SUMMARY_TRIGGER_TOKENS`. It is ignored by Git; the adjacent `.env.example` lists the same four keys without a real secret and can be committed. The repository-level `.env` remains available to other agents, but is not read by this one. This configuration isolation belongs to version 5; earlier versions' configuration locations are historical.
+
+| Setting | Learning default |
+|---|---|
+| Trigger | At least 500 estimated tokens in summary + message history |
+| Verbatim retention | Last two completed user turns, plus the current turn |
+| Summary length | Prompt target of approximately 100-150 tokens, not a hard output limit |
+| Model | Reuse the base model without bound tools |
+
+The estimator uses `count_tokens_approximately()` with its character-based defaults. It excludes fixed system instructions, saved plans, and tool schemas. This is not provider billing or a hard model-context limit. Four or five detailed turns may trigger compression; brief exchanges may take longer. Lower the threshold for a test, but there must still be a completed turn older than the two retained turns.
+
+### State and rolling updates
+
+`AgentState` extends `MessagesState` with an optional `summary`. Old checkpoints have no summary and use an empty string. No database migration is needed.
+
+Before user turn 5, for example:
+
+```text
+Completed turns 1, 2, 3, 4 + current user input 5
+    -> Summarize turns 1 and 2
+    -> Keep summary + original turns 3 and 4 + current turn 5
+```
+
+At a later trigger, combine the existing summary with only the newly selected older messages. Removed messages are not summarized again from the full archive. Summaries should preserve goals, constraints, corrections, decisions, and open questions, while treating the transcript as data rather than instructions.
+
+After successful generation, the summary node returns both the new `summary` and `RemoveMessage` entries for the selected prefix. The message reducer applies removals, and the Checkpointer saves the resulting state. The summary response is not appended as a normal assistant message. The response model receives current instructions, current saved plans, the historical summary, and recent original messages.
+
+### Complete turns and failure behavior
+
+Selection begins at user-message boundaries and retains the latest two complete turns. A tool request and all matching results stay together. Unfinished or malformed tool exchanges are not compacted. The summarizer receives a JSON transcript containing roles, content, tool requests, and results; it does not execute tools or access the plan database.
+
+If an otherwise valid summary does not reduce the older context, the summary node returns no state update and continues to the response model. Original messages and the previous summary remain unchanged. This handles short old turns followed by a long current input without trapping the conversation in repeated summary failures; the next launch accepts new input after the turn completes. The generation attempt still costs a model call, but no compaction notice is printed.
+
+An API failure propagates through the existing console error handling. Empty text, tool calls, or a truncated response raises `SummaryError`. No removal update is returned on failure, so the original messages and old summary remain. A failed summary node can be resumed with the same conversation. A later response-model failure does not undo an already committed summary.
+
+After a successful turn with compaction, the console prints:
+
+```text
+Context: Earlier conversation summarized; recent turns kept.
+```
+
+The summary text itself is not printed. Current saved plans always come from SQLite; an old summary about a deleted plan must not recreate it or override the current list.
+
+### Files and reading order
+
+| File | What to read |
+|---|---|
+| `config.py` | Agent-local `.env` reading, `SummaryConfig`, value conversion, and threshold validation |
+| `.env.example` | Shareable template for the four agent-local settings |
+| `state.py` | Optional summary alongside the inherited message reducer |
+| `summarization.py` | Token estimate, completed-prefix selection, plain-text validation, and removal update |
+| `prompt_templates/summary_prompt.md` | Rules for updating an existing summary |
+| `prompts.py` | Load the template and include historical summary data in the response prompt |
+| `graph.py` | Register the summary node between START and model |
+| `console.py` | Show compaction and summary errors without printing summary contents |
+| `tests/test_summarization.py` | Threshold boundaries, durable rolling state, and failure recovery |
+| `tests/test_config.py` | Isolation from outer files, process variables, and the current working directory |
+
+Read in the table's order, then trace one ordinary turn, one turn that triggers summary generation, and one tool-using turn. Summarization adds a model request only when needed, so it adds some cost and latency.
+
+File reading, parsing, and validation form one configuration-loading responsibility and stay together in `config.py`. `model.py` depends on this module for raw settings. This version 5 organization preserves the existing `.env` location and configuration behavior.
+
+### Exercises and checks
+
+1. Start a new conversation with threshold 500. Discuss a goal, available time, learning style, and a topic, using detailed exchanges.
+2. Observe the compaction notice, then ask about an early fact. Summary is lossy, so inspect actual results rather than assuming every detail survived.
+3. Exit, reopen the same conversation, and verify earlier summarized information is still available.
+4. Create another conversation and verify the summary is not shared; saved plans are shared.
+5. Raise `SUMMARY_TRIGGER_TOKENS` to 6000, restart, and compare trigger frequency.
+
+Offline tests cover local configuration isolation from parent files and process variables, the exact trigger boundary, no compression without eligible turns, JSON serialization of tool exchanges, rolling summary updates, invalid-summary preservation, skipping non-shortening summaries, continuing and reopening a short conversation after a long input, cross-process restoration, version 4 checkpoint compatibility, conversation isolation, and unchanged study-plan CRUD.
+
+This version compacts the latest state and model input. Older checkpoint snapshots are retained, so the SQLite file is not automatically reduced. Large individual inputs, very long retained turns, and huge preexisting archives can still exceed model capacity; chunked summarization and strict context budgets are outside this version.
+
+See the official [LangGraph summary example](https://docs.langchain.com/oss/python/langgraph/add-memory#summarize-messages) and [approximate token counter reference](https://reference.langchain.com/python/langchain-core/messages/utils/count_tokens_approximately).
 
 ## Recording future versions
 

@@ -8,6 +8,8 @@ from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.errors import GraphRecursionError
 
+from .summarization import SummaryError
+
 
 def select_thread(threads: list[str]) -> str | None:
     """Choose a saved conversation or name a new one; return None to exit."""
@@ -64,7 +66,8 @@ def chat(graph, thread_id: str = "default") -> None:
         try:
             # A failed or interrupted run may have a pending node. Finish it first,
             # without appending a new user message or repeating completed steps.
-            if graph.get_state(config).next:
+            snapshot = graph.get_state(config)
+            if snapshot.next:
                 print("Assistant: Resuming the unfinished turn.\n")
                 result = graph.invoke(None, config=config)
             else:
@@ -78,8 +81,28 @@ def chat(graph, thread_id: str = "default") -> None:
                 # Send only the new message. MessagesState merges it with the
                 # history restored by the checkpointer for this thread_id.
                 result = graph.invoke({"messages": [HumanMessage(text)]}, config=config)
+
+            # Compare message IDs before and after this invocation. A new conversation
+            # may have no saved messages, so the snapshot lookup defaults to [].
+            old_ids = {message.id for message in snapshot.values.get("messages", [])}
+            # The result contains the current messages after any summary removals
+            # and the new user/model/tool messages added during this invocation.
+            new_ids = {message.id for message in result["messages"]}
+            # Report compaction only when a nonempty summary exists and either
+            # the summary changed or some previously saved messages were removed.
+            if result.get("summary") and (
+                result["summary"] != snapshot.values.get("summary", "")
+                # Set difference: IDs present before but absent afterward.
+                # This also detects compaction when the summary text stays the same.
+                or old_ids - new_ids
+            ):
+                # Summarization already happened in the graph; only show a notice here.
+                print("Context: Earlier conversation summarized; recent turns kept.")
+            # Always print the final reply, whether or not compaction occurred.
             print(f"Assistant: {result['messages'][-1].text}\n")
         except (EOFError, KeyboardInterrupt):
+            # Ctrl+D ends input; Ctrl+C interrupts input or graph execution.
+            # Leave the chat loop so main() can close the saver's connection.
             print()
             break
         except GraphRecursionError:
@@ -96,6 +119,11 @@ def chat(graph, thread_id: str = "default") -> None:
         except sqlite3.Error as exc:
             print(
                 f"Assistant: Database operation failed. Check the SQLite file or try again later. Details: {exc}\n"
+            )
+            break
+        except SummaryError as exc:
+            print(
+                f"Assistant: Summary failed. Original messages were kept. Details: {exc}\n"
             )
             break
         # Handle file access and explicit plan-validation errors.

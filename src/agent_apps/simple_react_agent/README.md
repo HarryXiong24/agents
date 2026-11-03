@@ -2,20 +2,21 @@
 
 English | [简体中文](README.zh-CN.md)
 
-A small agent for learning one building block at a time. The current version is **version 4**: a plain console, four local tools, two graph nodes, SQLite conversation checkpoints, and SQLite study plans. Each plan has exactly three fields: project, duration, and date.
+A small agent for learning one building block at a time. The current version is **version 5**: a plain console, four local tools, three graph nodes, rolling conversation summaries, SQLite checkpoints, and SQLite study plans. Each plan still has exactly three fields: project, duration, and date.
 
 Code comments, tool descriptions, prompts, and terminal messages are in English. The assistant replies in English by default and can use another language when explicitly requested.
 
-See [Version Learning Guide](docs/VERSIONS.md) for each version's learning goals, architecture diagram, changes, reading order, and exercises. Version 4 adds persistent conversations while retaining the study-plan CRUD behavior. Old JSON data is never imported.
+See [Version Learning Guide](docs/VERSIONS.md) for each version's learning goals, architecture diagram, changes, reading order, and exercises. Version 5 adds summary compression to version 4's persistent conversations. Study-plan CRUD stays unchanged; old JSON data is never imported.
 
 ## Run
 
-Set your API key in the repository root `.env`. Existing model settings can be reused:
+Keep all four settings in this agent's own `src/agent_apps/simple_react_agent/.env`, beside `config.py`. If the file is missing, copy the adjacent [`.env.example`](.env.example) to `.env` and fill in your API key:
 
 ```dotenv
 GROQ_API_KEY=your-api-key
 AGENT_MODEL=openai/gpt-oss-20b
 GROQ_BASE_URL=https://api.groq.com
+SUMMARY_TRIGGER_TOKENS=500
 ```
 
 From the repository root:
@@ -45,7 +46,7 @@ python -m agent_apps.simple_react_agent
 
 The module entry point opens the same menu. Names serve as internal `thread_id` values and are case-sensitive. Surrounding whitespace is removed; empty or existing names are rejected when creating a conversation. Older saved conversations, including `default`, remain selectable. There is no automatic default selection or command-line conversation option.
 
-Type `exit` or `quit`, or press Ctrl+C, to stop. Exit commands are case-insensitive. Exported environment variables take precedence over `.env`.
+Type `exit` or `quit`, or press Ctrl+C, to stop. Exit commands are case-insensitive. Configuration is read only from the agent-local `.env`, independently of the working directory. The outer repository `.env` and same-named shell variables are not used. Values are read without modifying `os.environ` or expanding `${...}` references. The private `.env` is ignored by Git; `.env.example` is the shareable template.
 
 The console uses Python's standard `readline` module for Unicode editing and backspace without automatically recording input history. The current environment is macOS; no extra terminal package is required.
 
@@ -83,16 +84,16 @@ Ask "What time is it?" to observe the time tool. It returns local time in `YYYY-
 ## Read one block at a time
 
 1. `tools.py`: how `@tool`, parameter types, and descriptions expose local functions to the model.
-2. `model.py`: how `create_model()` reads configuration and creates the model.
+2. `config.py` and `model.py`: configuration loading and validation, followed by model creation.
 3. `memory.py` and `prompts.py`: how plans are stored, queried, and inserted into the system prompt.
-4. `graph.py` and `build_graph()`: how the model node, tool node, and conditional route form a loop.
+4. `state.py`, `summarization.py`, and `graph.py`: how the summary node prepares context before the model/tool loop.
 5. `checkpoints.py` and `console.py`: how storage returns a list of conversation names, the menu selects one, and `chat()` sends new messages with its `thread_id`.
 6. `main()` and `__main__.py`: how the application starts and keeps `SqliteSaver` open.
 
 The core loop is:
 
 ```text
-User input -> Model node
+User input -> Summary check -> Model node
                 |-- Tool calls -> Tool node -> Model node
                 |-- Final answer -> End turn -> Wait for user input
 ```
@@ -101,13 +102,40 @@ User input -> Model node
 
 Models do not always follow instructions perfectly. Check the printed tool messages to see what actually executed. The program does not display the model's private reasoning.
 
-## Version 4: persistent conversations
+## Persistent conversations (introduced in version 4)
 
 Start `uv run simple-react-agent`, choose `0`, name the conversation `study-python`, say "I want to learn decorators," then exit. Start again, select `study-python` by its displayed number, and ask "What did I want to learn?" The graph restores messages from `data/checkpoints.sqlite` using that conversation's `thread_id`.
 
 Create another conversation named `study-english` for separate history. Startup always asks you to choose; you do not need to remember or pass an ID. Displayed numbers are temporary menu positions, while the saved conversation names remain stable.
 
-The console sends only the new `HumanMessage`. `MessagesState` merges it with the restored state, and the checkpointer saves user messages, model replies, tool requests, and tool results. No extra graph nodes or tools are added.
+The console sends only the new `HumanMessage`. `AgentState` extends `MessagesState` with an optional `summary`. The checkpointer saves that summary together with recent user messages, model replies, tool requests, and tool results.
+
+## Version 5: rolling conversation summaries
+
+Before the first model call of each new user turn, the summary node estimates tokens in the existing summary and message history. At or above the configured threshold, it combines the old summary with older completed turns, keeping the latest **two completed user turns plus the current turn** in their original form. A turn includes all of its tool requests, results, and final answer; it is not a single message.
+
+Set `SUMMARY_TRIGGER_TOKENS` in `src/agent_apps/simple_react_agent/.env`. The default is **500** when the setting is absent; an explicit value must be a positive integer. Restart after changing it. For example:
+
+```dotenv
+# Easy-to-observe learning default; use a larger value such as 6000 later.
+SUMMARY_TRIGGER_TOKENS=500
+```
+
+To test a lower threshold, change the value in this same local file to `300` and restart. Exporting a global variable does not override this agent's file.
+
+The threshold counts only the summary and conversation messages, excluding fixed system instructions, saved plans, and tool definitions. It uses LangChain's approximate character-based counter, not Groq's exact tokenizer. Four or five sufficiently detailed turns may trigger compression at 500, but very short exchanges can take longer. Lowering the threshold still cannot compress until there are older turns beyond the two retained turns.
+
+For a quick test, create a conversation and provide a learning goal, available time, preferred learning style, and a topic to review in four successive messages. Ask for reasonably detailed replies. After compression, a successful turn prints:
+
+```text
+Context: Earlier conversation summarized; recent turns kept.
+```
+
+The base model generates the summary without tool binding. Its Markdown instructions target roughly **100-150 tokens**, preserving goals, constraints, corrections, decisions, and open questions. This is a soft target. If a valid summary is not shorter than the older context, compression is skipped and the agent answers using the unchanged history and previous summary. Empty, truncated, or tool-calling summaries remain errors, preserving original state for recovery. Summary generation attempts add API usage and latency even if compression is skipped, but do not become normal assistant messages.
+
+The response model receives system instructions, the latest database plan list, the historical summary, and recent original messages. The summary is historical data, not new instructions; current saved plans remain authoritative. No summary operation saves or deletes study plans.
+
+Compression updates the current graph state using `RemoveMessage`. Older checkpoint snapshots remain in SQLite, so the database file does not automatically shrink. Restarting the same conversation restores its summary and recent messages. Existing version 4 checkpoints work with an empty initial summary and need no migration. Long individual inputs, large retained turns, or very large old histories can still exceed a model's capacity; this version does not implement chunked summarization or a hard context limit.
 
 ## SQLite study plans (introduced in version 3)
 
@@ -153,14 +181,20 @@ Deletion matches project and date, without requiring duration. The assistant sho
 
 ```text
 simple_react_agent/
+├── .env                          # Private local configuration; ignored by Git
+├── .env.example                  # Shareable configuration template
 ├── main.py                       # Startup, resource lifetime, and composition
 ├── checkpoints.py               # Checkpoint path and saved conversation queries
 ├── console.py                   # Menu, chat, and terminal error messages
-├── graph.py                      # Graph construction, nodes, and routing
+├── config.py                     # Local .env loading, parsing, and validation
+├── state.py                      # Recent messages and historical summary
+├── summarization.py              # Token estimate, safe turn selection, summary update
+├── graph.py                      # Summary, model, and tool nodes
 ├── prompts.py                    # Load templates and insert plan data
 └── prompt_templates/            # Markdown only; no __init__.py
     ├── system_prompt.md          # Role, tools, saving, and deletion rules
-    └── study_plans_prompt.md     # Plan-list template with a {plans} placeholder
+    ├── study_plans_prompt.md     # Plan-list template with a {plans} placeholder
+    └── summary_prompt.md         # Rolling-summary instructions, no tools
 ```
 
 Edit the relevant `.md` file to change instructions. `prompts.py` loads templates as UTF-8 and formats plan data. Templates load at import time, so restart after editing. The short tool-error instruction remains the `TOOL_ERROR_MESSAGE` string in `prompts.py`.
@@ -169,11 +203,13 @@ Filenames use lowercase and Python constants use uppercase; their casing does no
 
 `main.py` opens the saver, gets `threads = checkpoints.list_threads(checkpointer)`, and passes that ordinary list to `select_thread(threads)` in `console.py`. The menu does not access the database. `checkpoints.py` owns `CHECKPOINTS_FILE` and the SQL used to list saved conversations; `console.py` owns `select_thread()` and `chat()`. Startup enters the conversation menu directly, without command-line argument parsing.
 
+`config.py` owns `ENV_FILE`, `read_env()`, `SummaryConfig`, and configuration parsing/validation. File reading is part of configuration loading and stays in the same module. `model.py` uses `config.read_env()` to create the model; `main.py` assembles the application.
+
 ## Two kinds of memory
 
 `data/checkpoints.sqlite` stores graph state by `thread_id`, including conversation history and execution progress. `data/study_plans.sqlite` stores the three-field plans. Different threads have separate conversations but share the same plan list; a thread ID is not a user account.
 
-Both files survive restart and are excluded from Git. History is not compacted yet; choose `0` at startup for a fresh conversation. Run one console at a time for a given conversation.
+Both files survive restart and are excluded from Git. Version 5 keeps recent original messages and a lossy historical summary in the latest graph state. Choose `0` at startup for a fresh conversation. Run one console at a time for a given conversation.
 
 Expected graph/API/storage errors end the console session and preserve whatever checkpoints were successfully saved. On restart, `get_state(config).next` detects unfinished work and `invoke(None, config)` continues it before new input is accepted. Completed checkpointed steps are reused; a node interrupted before its result was saved may run again. Checkpoints and plan writes are separate transactions, so this is not an exactly-once guarantee for tool side effects. A later model failure does not roll back a committed plan change.
 
@@ -183,7 +219,7 @@ The calculator uses floating-point arithmetic for everyday duration calculations
 
 Add a local "minutes to hours" tool to `TOOLS` and observe why the graph edges need no changes.
 
-Use the [Version Learning Guide](docs/VERSIONS.md) to study `SqliteSaver`, `thread_id`, state restoration, and the two kinds of memory. Keep the current three plan fields while practicing the existing CRUD behavior.
+Use the [Version Learning Guide](docs/VERSIONS.md) to study summary state, token thresholds, complete turns, and `RemoveMessage`. Keep the current three plan fields while practicing the existing CRUD behavior.
 
 ## Offline checks
 
@@ -193,4 +229,4 @@ From the repository root:
 uv run pytest -q src/agent_apps/simple_react_agent/tests
 ```
 
-Tests use a simulated model and temporary databases. They require no API key or network. Tests cover cross-process checkpoint restoration, conversation isolation, failure recovery, study-plan CRUD, and Unicode input and storage.
+Tests use simulated models, temporary configuration files, and temporary databases without real API keys or network. They cover configuration isolation, threshold boundaries, rolling summaries, tool-pair preservation, failed summary recovery, cross-process restoration, version 4 compatibility, study-plan CRUD, and Unicode input and storage.

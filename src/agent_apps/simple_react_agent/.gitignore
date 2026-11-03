@@ -1,2 +1,7 @@
 # Keep personal plans and conversation checkpoints out of the repository.
 data/
+
+# Keep agent-local secrets private; commit only the configuration template.
+.env
+.env.*
+!.env.example

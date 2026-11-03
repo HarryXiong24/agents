@@ -14,7 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from agent_apps.simple_react_agent import checkpoints, console, memory
+from agent_apps.simple_react_agent import checkpoints, config, console, memory
 from agent_apps.simple_react_agent import main as app
 from agent_apps.simple_react_agent.graph import build_graph
 
@@ -25,6 +25,7 @@ def isolate_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(
         checkpoints, "CHECKPOINTS_FILE", tmp_path / "data" / "checkpoints.sqlite"
     )
+    monkeypatch.setattr(config, "ENV_FILE", tmp_path / ".env")
 
 
 def make_model(*responses):
