@@ -150,7 +150,7 @@ def test_restart_after_model_failure_does_not_repeat_completed_save(
         assert graph.get_state(config).next == ()
     assert save.call_count == 1
     assert len(result["messages"]) == 4
-    assert "Saved study plan" in resumed.invoke.call_args.args[0][-1].content
+    assert "Saved todo" in resumed.invoke.call_args.args[0][-1].content
 
 
 def test_main_opens_saver_for_chat_then_closes_it(monkeypatch):

@@ -59,7 +59,7 @@ def chat(graph, thread_id: str = "default") -> None:
         "recursion_limit": 20,
     }
     print("------")
-    print("Study Time Assistant is ready.\nType 'exit' to quit. ")
+    print("Todo List Assistant is ready.\nType 'exit' to quit. ")
     print(f"Conversation: {thread_id}.")
 
     while True:
@@ -126,11 +126,11 @@ def chat(graph, thread_id: str = "default") -> None:
                 f"Assistant: Summary failed. Original messages were kept. Details: {exc}\n"
             )
             break
-        # Handle file access and explicit plan-validation errors.
+        # Handle file access and explicit todo-validation errors.
         # Unexpected exceptions propagate with their traceback for debugging.
         except (OSError, ValueError, TypeError) as exc:
             print(
-                f"Assistant: This turn failed. Check the study plan file or your input. Details: {exc}\n"
+                f"Assistant: This turn failed. Check the todo storage or your input. Details: {exc}\n"
             )
             break
 

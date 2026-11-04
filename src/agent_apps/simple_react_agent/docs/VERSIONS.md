@@ -4,7 +4,7 @@ English | [简体中文](VERSIONS.zh-CN.md)
 
 This document records what each version teaches, what it adds, and how to verify it. Append the same information when a future version adds another building block.
 
-The running code is **version 5**, adding rolling summaries to SQLite-backed conversations and study plans. Versions 1 through 4 describe the learning history, not separate runnable directories. Follow version 5 when reading the current context-management code.
+The running code is **version 5**, adding rolling summaries to SQLite-backed conversations and stored records. The current assistant manages todos using the existing study-plan storage. Versions 1 through 4 describe the learning history, not separate runnable directories. Follow version 5 when reading the current context-management code.
 
 Code, prompts, tool descriptions, and terminal messages use English. The assistant replies in English by default, with another language available on explicit request. Exit with `exit` or `quit`.
 
@@ -498,7 +498,23 @@ See the official [LangGraph persistence guide](https://docs.langchain.com/oss/py
 
 ### Learning goal and scope
 
-Distinguish saved checkpoints, the current graph state, and the context sent to the model. Compress older completed conversations into a rolling summary while keeping recent turns verbatim. The conversation menu, SQLite saver, four tools, and three-field study plans remain unchanged. The earlier execution-budget proposal is not part of this version.
+Distinguish saved checkpoints, the current graph state, and the context sent to the model. Compress older completed conversations into a rolling summary while keeping recent turns verbatim. The conversation menu, SQLite saver, four tools, and three-field stored records remain unchanged. The earlier execution-budget proposal is not part of this version.
+
+### Todo theme adjustment before version 6
+
+The application now presents Todo List Assistant for home, work, and learning tasks. This is a prompt/copy adjustment within version 5; version 6 execution budgets are not implemented.
+
+| Existing field | Current meaning |
+|---|---|
+| `project` | Todo name |
+| `minutes` | Estimated duration in minutes, still required and limited to 1-1440 |
+| `date` | Scheduled date, still required in YYYY-MM-DD format |
+
+Adding, listing/filtering, updating duration, deleting, and duration calculations use the existing code paths. There is no completion/status field, so saying a todo is done does not authorize deletion or persist completion. The same name/date updates duration only; a new name/date creates another record rather than renaming or rescheduling the original.
+
+`data/study_plans.sqlite`, the `study_plans` table, all record fields, `StudyPlan`, storage function names, and tool names `save_study_plan`/`delete_study_plan` are retained. Existing records appear as todos without migration or duplication. The change does not rewrite stored messages, IDs, summaries, or checkpoints. Normal summary compression still runs on later user turns. Older versions above remain historical learning records.
+
+The current list template is `prompt_templates/todo_list_prompt.md`, loaded as `TODO_LIST_PROMPT`; it retains the `{plans}` placeholder for formatting existing dictionaries. System instructions, tool descriptions, current return messages, and console labels use todo wording. Summary instructions preserve the meaning of older study discussions and operations. The package and launch command retain their existing names.
 
 ### Component diagram
 
@@ -515,7 +531,7 @@ flowchart TD
     T -->|Results within the same turn| M
     M -->|Final answer| E[END]
     CP[SQLite Checkpointer] <-->|Summary and recent messages| S
-    P[Current study-plan database] -->|Read before each response-model call| M
+    P[Current todo database - legacy study_plans] -->|Read before each response-model call| M
     SP[New: summary_prompt.md and unbound base model] --> S
     classDef changed fill:#fff3df,stroke:#c76a00,stroke-width:2px;
     class S,CFG,U,SP changed;
@@ -542,7 +558,7 @@ The local `.env` contains `GROQ_API_KEY`, `AGENT_MODEL`, `GROQ_BASE_URL`, and `S
 | Summary length | Prompt target of approximately 100-150 tokens, not a hard output limit |
 | Model | Reuse the base model without bound tools |
 
-The estimator uses `count_tokens_approximately()` with its character-based defaults. It excludes fixed system instructions, saved plans, and tool schemas. This is not provider billing or a hard model-context limit. Four or five detailed turns may trigger compression; brief exchanges may take longer. Lower the threshold for a test, but there must still be a completed turn older than the two retained turns.
+The estimator uses `count_tokens_approximately()` with its character-based defaults. It excludes fixed system instructions, saved todos, and tool schemas. This is not provider billing or a hard model-context limit. Four or five detailed turns may trigger compression; brief exchanges may take longer. Lower the threshold for a test, but there must still be a completed turn older than the two retained turns.
 
 ### State and rolling updates
 
@@ -558,11 +574,11 @@ Completed turns 1, 2, 3, 4 + current user input 5
 
 At a later trigger, combine the existing summary with only the newly selected older messages. Removed messages are not summarized again from the full archive. Summaries should preserve goals, constraints, corrections, decisions, and open questions, while treating the transcript as data rather than instructions.
 
-After successful generation, the summary node returns both the new `summary` and `RemoveMessage` entries for the selected prefix. The message reducer applies removals, and the Checkpointer saves the resulting state. The summary response is not appended as a normal assistant message. The response model receives current instructions, current saved plans, the historical summary, and recent original messages.
+After successful generation, the summary node returns both the new `summary` and `RemoveMessage` entries for the selected prefix. The message reducer applies removals, and the Checkpointer saves the resulting state. The summary response is not appended as a normal assistant message. The response model receives current instructions, current saved todos, the historical summary, and recent original messages.
 
 ### Complete turns and failure behavior
 
-Selection begins at user-message boundaries and retains the latest two complete turns. A tool request and all matching results stay together. Unfinished or malformed tool exchanges are not compacted. The summarizer receives a JSON transcript containing roles, content, tool requests, and results; it does not execute tools or access the plan database.
+Selection begins at user-message boundaries and retains the latest two complete turns. A tool request and all matching results stay together. Unfinished or malformed tool exchanges are not compacted. The summarizer receives a JSON transcript containing roles, content, tool requests, and results; it does not execute tools or access the todo database.
 
 If an otherwise valid summary does not reduce the older context, the summary node returns no state update and continues to the response model. Original messages and the previous summary remain unchanged. This handles short old turns followed by a long current input without trapping the conversation in repeated summary failures; the next launch accepts new input after the turn completes. The generation attempt still costs a model call, but no compaction notice is printed.
 
@@ -574,7 +590,7 @@ After a successful turn with compaction, the console prints:
 Context: Earlier conversation summarized; recent turns kept.
 ```
 
-The summary text itself is not printed. Current saved plans always come from SQLite; an old summary about a deleted plan must not recreate it or override the current list.
+The summary text itself is not printed. Current saved todos always come from SQLite; an old summary about a deleted todo must not recreate it or override the current list.
 
 ### Files and reading order
 
@@ -585,11 +601,12 @@ The summary text itself is not printed. Current saved plans always come from SQL
 | `state.py` | Optional summary alongside the inherited message reducer |
 | `summarization.py` | Token estimate, completed-prefix selection, plain-text validation, and removal update |
 | `prompt_templates/summary_prompt.md` | Rules for updating an existing summary |
-| `prompts.py` | Load the template and include historical summary data in the response prompt |
+| `prompts.py`, `prompt_templates/todo_list_prompt.md` | Display stored todos with unchanged keys and include historical summary data in the response prompt |
 | `graph.py` | Register the summary node between START and model |
 | `console.py` | Show compaction and summary errors without printing summary contents |
 | `tests/test_summarization.py` | Threshold boundaries, durable rolling state, and failure recovery |
 | `tests/test_config.py` | Isolation from outer files, process variables, and the current working directory |
+| `tests/test_todo_compatibility.py` | Todo copy and CRUD, original records, and resuming legacy tool calls without rewriting old messages or summary |
 
 Read in the table's order, then trace one ordinary turn, one turn that triggers summary generation, and one tool-using turn. Summarization adds a model request only when needed, so it adds some cost and latency.
 
@@ -600,10 +617,10 @@ File reading, parsing, and validation form one configuration-loading responsibil
 1. Start a new conversation with threshold 500. Discuss a goal, available time, learning style, and a topic, using detailed exchanges.
 2. Observe the compaction notice, then ask about an early fact. Summary is lossy, so inspect actual results rather than assuming every detail survived.
 3. Exit, reopen the same conversation, and verify earlier summarized information is still available.
-4. Create another conversation and verify the summary is not shared; saved plans are shared.
+4. Create another conversation and verify the summary is not shared; saved todos are shared.
 5. Raise `SUMMARY_TRIGGER_TOKENS` to 6000, restart, and compare trigger frequency.
 
-Offline tests cover local configuration isolation from parent files and process variables, the exact trigger boundary, no compression without eligible turns, JSON serialization of tool exchanges, rolling summary updates, invalid-summary preservation, skipping non-shortening summaries, continuing and reopening a short conversation after a long input, cross-process restoration, version 4 checkpoint compatibility, conversation isolation, and unchanged study-plan CRUD.
+Offline tests cover local configuration isolation from parent files and process variables, the exact trigger boundary, no compression without eligible turns, JSON serialization of tool exchanges, rolling summary updates, invalid-summary preservation, skipping non-shortening summaries, continuing and reopening a short conversation after a long input, cross-process restoration, version 4 checkpoint compatibility, conversation isolation, and unchanged todo CRUD.
 
 This version compacts the latest state and model input. Older checkpoint snapshots are retained, so the SQLite file is not automatically reduced. Large individual inputs, very long retained turns, and huge preexisting archives can still exceed model capacity; chunked summarization and strict context budgets are outside this version.
 

@@ -1,1 +1,1 @@
-"""Study Time Assistant: learn agents through a minimal ReAct loop."""
+"""Todo List Assistant: learn agents through a minimal ReAct loop."""

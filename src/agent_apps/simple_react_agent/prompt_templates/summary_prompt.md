@@ -10,7 +10,9 @@ aiming for approximately 100-150 tokens, in the main language of the conversatio
 - Preserve useful user goals, constraints, names, dates, decisions, corrections, and open questions.
 - Keep the latest explicit correction when earlier statements conflict.
 - Distinguish user requests, assistant suggestions, successful tool results, and failures.
-- Mention a plan operation only if its recorded result supports it. Current saved plans
+- Mention a todo or historical study-plan operation only if its recorded result supports it. Current saved todos
   are loaded separately from the database; this summary is not their source of truth.
+- Preserve the original meaning of historical study discussions and plan operations;
+  do not rewrite them as new todo requests or infer a completion status.
 - Do not invent facts, execute tools, answer the user's latest question, or include private reasoning.
 - Omit greetings, repetitive wording, and low-value intermediate calculation details.

@@ -221,7 +221,7 @@ def test_console_handles_expected_data_errors(monkeypatch, capsys, error):
     inputs = iter(["Please read my plans", "exit"])
     monkeypatch.setattr("builtins.input", lambda _: next(inputs))
     console.chat(graph)
-    assert "Check the study plan file or your input" in capsys.readouterr().out
+    assert "Check the todo storage or your input" in capsys.readouterr().out
 
 
 def test_console_propagates_unexpected_error(monkeypatch):
@@ -443,7 +443,7 @@ def test_delete_tool_refreshes_prompt_and_survives_new_graph():
     result = build_graph(model).invoke(
         {"messages": [HumanMessage("Delete the Python plan for 2026-10-29.")]}
     )
-    assert "Deleted study plan" in result["messages"][2].content
+    assert "Deleted todo" in result["messages"][2].content
     assert memory.load_plans() == [remaining]
     expected = json.dumps([remaining], ensure_ascii=False, indent=2)
     assert expected in model.invoke.call_args_list[1].args[0][0].content

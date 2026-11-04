@@ -1,4 +1,4 @@
-"""Block 2: local tools for time, arithmetic, and study plan writes."""
+"""Local tools for time, arithmetic, and todos; legacy tool names stay compatible."""
 
 import math
 from datetime import datetime
@@ -17,12 +17,14 @@ def get_current_time() -> str:
 
 
 @tool
-def calculate(a: float, b: float, operation: Literal["add", "subtract", "multiply", "divide"]) -> str:
-    """Add, subtract, multiply, or divide two numbers, including study durations.
+def calculate(
+    a: float, b: float, operation: Literal["add", "subtract", "multiply", "divide"]
+) -> str:
+    """Add, subtract, multiply, or divide two numbers, including todo estimates.
 
     a is the first number; b is the second number.
     operation must be add, subtract, multiply, or divide.
-    Example: 45 minutes per day for 7 days uses a=45, b=7, operation="multiply".
+    Example: seven 45-minute tasks use a=45, b=7, operation="multiply".
     Perform one operation per call; use the result in subsequent calls as needed.
     """
     print(f"Tool: Calculating {a} {operation} {b}.")
@@ -48,34 +50,39 @@ def calculate(a: float, b: float, operation: Literal["add", "subtract", "multipl
 
 @tool
 def save_study_plan(project: str, minutes: int, date: str) -> str:
-    """Save a study plan across restarts when the user asks to save or update it.
+    """Add or update a todo across restarts when the user explicitly requests it.
 
-    project is the study topic, minutes is an integer from 1 to 1440, and date is YYYY-MM-DD.
-    Example: project="Python", minutes=60, date="2026-10-29".
+    project is the todo name, minutes is its estimated duration from 1 to 1440,
+    and date is the scheduled date in YYYY-MM-DD format. All fields are required.
+    Example: project="Clean room", minutes=30, date="2026-11-04".
     Ask for missing fields. Resolve relative dates with the time tool and convert hours to minutes.
-    The same project and date updates duration; a different project or date adds a plan.
+    The same name and date updates duration; a different name or date adds a todo.
+    This tool does not rename, reschedule, or mark todos complete. Its legacy name
+    is retained so historical tool calls and unfinished checkpoints still work.
     """
     # Report success only after the write; the tool node handles execution errors.
     plan = memory.save_plan(project, minutes, date)
-    result = f"Saved study plan: {plan['project']}, {plan['minutes']} minutes, {plan['date']}."
+    result = f"Saved todo: {plan['project']}, estimated {plan['minutes']} minutes, scheduled for {plan['date']}."
     print(f"Tool: {result}")
     return result
 
 
 @tool
 def delete_study_plan(project: str, date: str) -> str:
-    """Delete a study plan by project and date only when explicitly requested.
+    """Delete a todo by name and scheduled date only when explicitly requested.
 
-    project is the study topic; date must use YYYY-MM-DD. Duration is not required.
-    Example: project="Python", date="2026-10-29".
-    Ask if the project or date is unclear; resolve relative dates with the time tool.
-    Delete only the matching plan. If it is missing, report that and preserve other plans.
+    project is the todo name; date must use YYYY-MM-DD. Duration is not required.
+    Example: project="Clean room", date="2026-11-04".
+    Ask if the name or date is unclear; resolve relative dates with the time tool.
+    Delete only the matching todo. If missing, report that and preserve other todos.
+    Saying a todo is done does not authorize deletion; there is no completion field.
+    The legacy tool name is retained for historical calls and checkpoints.
     """
     deleted = memory.delete_plan(project, date)
     if deleted:
-        result = f"Deleted study plan: {project.strip()}, {date}."
+        result = f"Deleted todo: {project.strip()}, {date}."
     else:
-        result = f"Study plan not found: {project.strip()}, {date}. No plans were deleted."
+        result = f"Todo not found: {project.strip()}, {date}. No todos were deleted."
     print(f"Tool: {result}")
     return result
 

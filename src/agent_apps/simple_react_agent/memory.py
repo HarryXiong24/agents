@@ -1,4 +1,4 @@
-"""Version 3: store study plans in SQLite and return three-field dictionaries."""
+"""Store todos in the original study-plan database without schema or record migration."""
 
 import sqlite3
 from collections.abc import Generator
@@ -12,7 +12,7 @@ DATABASE_FILE = Path(__file__).resolve().parent / "data" / "study_plans.sqlite"
 
 
 class StudyPlan(TypedDict):
-    """A plan has exactly these fields; functions below validate data at runtime."""
+    """Legacy record name: project is the todo name, minutes its estimate, date its schedule."""
 
     project: str
     minutes: int
@@ -22,21 +22,21 @@ class StudyPlan(TypedDict):
 def _validate_plan_key(project: str, planned_date: str) -> tuple[str, str]:
     """Project and date identify a plan; reads and writes share this validation."""
     if not isinstance(project, str):
-        raise TypeError("The study project must be a string.")
+        raise TypeError("The todo name must be a string.")
     project = project.strip()
     if not project:
-        raise ValueError("The study project must not be empty.")
+        raise ValueError("The todo name must not be empty.")
     if not isinstance(planned_date, str):
-        raise TypeError("The study date must be a string.")
+        raise TypeError("The scheduled date must be a string.")
     try:
         parsed_date = calendar_date.fromisoformat(planned_date)
     except ValueError as exc:
         raise ValueError(
-            "The study date must be a valid date in YYYY-MM-DD format."
+            "The scheduled date must be a valid date in YYYY-MM-DD format."
         ) from exc
     # fromisoformat accepts other ISO forms; require the full calendar date here.
     if parsed_date.isoformat() != planned_date:
-        raise ValueError("The study date must use YYYY-MM-DD format.")
+        raise ValueError("The scheduled date must use YYYY-MM-DD format.")
     return project, planned_date
 
 
@@ -44,9 +44,9 @@ def _validate_plan(project: str, minutes: int, planned_date: str) -> StudyPlan:
     """Use TypeError for invalid types and ValueError for invalid values."""
     project, planned_date = _validate_plan_key(project, planned_date)
     if type(minutes) is not int:
-        raise TypeError("Study duration must be an integer number of minutes.")
+        raise TypeError("Estimated duration must be an integer number of minutes.")
     if not 1 <= minutes <= 1440:
-        raise ValueError("Study duration must be between 1 and 1440 minutes.")
+        raise ValueError("Estimated duration must be between 1 and 1440 minutes.")
     return {"project": project, "minutes": minutes, "date": planned_date}
 
 
