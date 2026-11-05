@@ -1,0 +1,212 @@
+"""Check SQLite CRUD, transactions, concurrent calls, and cross-process reads."""
+
+import json
+import sqlite3
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+
+import pytest
+
+from agent_apps.todo_list_assistant_agent.agent import memory
+
+
+@pytest.fixture(autouse=True)
+def isolate_todos(tmp_path, monkeypatch):
+    monkeypatch.setattr(memory, "DATABASE_FILE", tmp_path / "data" / "todos.sqlite")
+
+
+def read_in_new_process():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json, sys; from pathlib import Path; "
+                "from agent_apps.todo_list_assistant_agent.agent import memory; "
+                "memory.DATABASE_FILE = Path(sys.argv[1]); "
+                "print(json.dumps(memory.load_todos()))"
+            ),
+            str(memory.DATABASE_FILE),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def test_first_start_creates_database_with_only_three_columns():
+    assert memory.load_todos() == []
+    assert memory.DATABASE_FILE.exists()
+    with closing(sqlite3.connect(memory.DATABASE_FILE)) as connection:
+        assert [row[1] for row in connection.execute("PRAGMA table_info(todos)")] == [
+            "project",
+            "minutes",
+            "date",
+        ]
+
+
+def test_save_multiple_todos_and_update_only_same_project_date():
+    first = memory.save_todo(" Python ", 60, "2026-10-29")
+    second = memory.save_todo("English", 30, "2026-10-29")
+    third = memory.save_todo("Python", 45, "2026-10-30")
+    assert first == {"project": "Python", "minutes": 60, "date": "2026-10-29"}
+    assert memory.load_todos() == [first, second, third]
+    updated = memory.save_todo("Python", 90, "2026-10-29")
+    assert memory.load_todos() == [updated, second, third]
+    assert all(
+        set(todo) == {"project", "minutes", "date"} for todo in memory.load_todos()
+    )
+
+
+@pytest.mark.parametrize("deleted", [False, True])
+def test_new_process_reads_committed_todos(deleted):
+    saved = memory.save_todo("Python", 60, "2026-10-29")
+    if deleted:
+        assert memory.delete_todo("Python", "2026-10-29")
+    assert read_in_new_process() == ([] if deleted else [saved])
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("project", " ", ValueError),
+        ("project", 123, TypeError),
+        ("minutes", 0, ValueError),
+        ("minutes", -1, ValueError),
+        ("minutes", 1441, ValueError),
+        ("minutes", 30.5, TypeError),
+        ("minutes", "30", TypeError),
+        ("minutes", True, TypeError),
+        ("date", "2026-02-30", ValueError),
+        ("date", "20261029", ValueError),
+        ("date", "2026-W44-4", ValueError),
+        ("date", "2026-2-3", ValueError),
+        ("date", "", ValueError),
+        ("date", 20261029, TypeError),
+    ],
+)
+def test_invalid_save_keeps_existing_todos(field, value, error):
+    saved = memory.save_todo("Python", 60, "2026-10-29")
+    args = {"project": "English", "minutes": 30, "date": "2026-10-30"}
+    args[field] = value
+    with pytest.raises(error):
+        memory.save_todo(args["project"], args["minutes"], args["date"])
+    assert memory.load_todos() == [saved]
+
+
+def test_delete_only_matches_both_project_and_date():
+    memory.save_todo("Python", 60, "2026-10-29")
+    same_project = memory.save_todo("Python", 45, "2026-10-30")
+    same_date = memory.save_todo("English", 30, "2026-10-29")
+    assert memory.delete_todo(" Python ", "2026-10-29") is True
+    assert memory.load_todos() == [same_project, same_date]
+    assert memory.delete_todo("Python", "2026-10-29") is False
+    assert memory.load_todos() == [same_project, same_date]
+
+
+def test_delete_missing_todo_returns_false():
+    assert memory.delete_todo("Python", "2026-10-29") is False
+    assert memory.load_todos() == []
+
+
+@pytest.mark.parametrize(
+    ("project", "scheduled_date", "error"),
+    [
+        (" ", "2026-10-29", ValueError),
+        (None, "2026-10-29", TypeError),
+        ("Python", "2026-02-30", ValueError),
+        ("Python", "20261029", ValueError),
+        ("Python", None, TypeError),
+    ],
+)
+def test_invalid_delete_preserves_todos(project, scheduled_date, error):
+    saved = memory.save_todo("Python", 60, "2026-10-29")
+    with pytest.raises(error):
+        memory.delete_todo(project, scheduled_date)
+    assert memory.load_todos() == [saved]
+
+
+def test_concurrent_first_saves_keep_every_todo():
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        saved = list(
+            pool.map(
+                lambda index: memory.save_todo(f"Project{index}", 30, "2026-10-29"),
+                range(12),
+            )
+        )
+    assert sorted(memory.load_todos(), key=lambda todo: todo["project"]) == sorted(
+        saved, key=lambda todo: todo["project"]
+    )
+
+
+def test_concurrent_save_and_delete_do_not_lose_other_todo():
+    memory.save_todo("Python", 60, "2026-10-29")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        saved = pool.submit(memory.save_todo, "English", 30, "2026-10-29")
+        deleted = pool.submit(memory.delete_todo, "Python", "2026-10-29")
+        saved_todo = saved.result()
+        assert deleted.result() is True
+    assert memory.load_todos() == [saved_todo]
+
+
+def test_sql_parameters_preserve_project_with_quotes():
+    project = "Python's 基础'; DROP TABLE todos; --"
+    saved = memory.save_todo(project, 60, "2026-10-29")
+    assert memory.load_todos() == [saved]
+    assert memory.delete_todo(project, "2026-10-29") is True
+    assert memory.load_todos() == []
+
+
+def test_transaction_rolls_back_and_connection_closes():
+    saved = memory.save_todo("Python", 60, "2026-10-29")
+    with pytest.raises(sqlite3.IntegrityError), memory._connect() as connection:
+        connection.execute("UPDATE todos SET minutes = 90")
+        connection.execute(
+            "INSERT INTO todos VALUES (?, ?, ?)", ("English", 0, "2026-10-29")
+        )
+    assert memory.load_todos() == [saved]
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connection.execute("SELECT 1")
+
+
+@pytest.mark.parametrize("operation", ["save", "delete"])
+def test_failed_write_preserves_todos(operation):
+    saved = memory.save_todo("Python", 60, "2026-10-29")
+    event = "INSERT" if operation == "save" else "DELETE"
+    with closing(sqlite3.connect(memory.DATABASE_FILE)) as connection:
+        connection.execute(f"""CREATE TRIGGER fail_write AFTER {event} ON todos
+            BEGIN SELECT RAISE(ABORT, 'Simulated write failure'); END""")
+    with pytest.raises(sqlite3.IntegrityError, match="Simulated write failure"):
+        if operation == "save":
+            memory.save_todo("English", 30, "2026-10-29")
+        else:
+            memory.delete_todo("Python", "2026-10-29")
+    assert memory.load_todos() == [saved]
+
+
+@pytest.mark.parametrize(
+    "old_contents",
+    [
+        '[{"project": "Old todo", "minutes": 60, "date": "2026-10-29"}]',
+        "Invalid old JSON",
+    ],
+)
+def test_old_json_is_ignored(old_contents):
+    old_file = memory.DATABASE_FILE.with_suffix(".json")
+    old_file.parent.mkdir(parents=True)
+    old_file.write_text(old_contents, encoding="utf-8")
+    assert memory.load_todos() == []
+    saved = memory.save_todo("New todo", 30, "2026-10-30")
+    assert read_in_new_process() == [saved]
+    assert old_file.read_text(encoding="utf-8") == old_contents
+
+
+def test_corrupted_database_is_reported_without_overwrite():
+    memory.DATABASE_FILE.parent.mkdir(parents=True)
+    memory.DATABASE_FILE.write_bytes(b"invalid database")
+    with pytest.raises(sqlite3.DatabaseError):
+        memory.load_todos()
+    assert memory.DATABASE_FILE.read_bytes() == b"invalid database"
