@@ -1,6 +1,6 @@
 """Configuration for the model, loop budgets, memory, approval policy and storage.
 📘 LEARN: frozen settings prevent accidental mutation; environment variables let you experiment.
-🧪 TRY: AGENT_MAX_ITERATIONS=2 uv run react-agent
+🧪 TRY: AGENT_MAX_ITERATIONS=2 uv run bookkeeping-agent
 
 模型、循环预算、记忆、审批策略和存储配置。
 📘 LEARN：冻结配置避免意外修改；通过环境变量进行实验。

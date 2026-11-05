@@ -1,9 +1,9 @@
-"""Console for Ledger: uv run react-agent --user harry [--thread ID].
+"""Console for Ledger: uv run bookkeeping-agent --user harry [--thread ID].
 📘 LEARN: the graph is independent of the terminal. This caller wires services, streams
 node updates, handles interrupts/resume, and exposes inspection commands.
 A web UI could replace this file without changing the graph.
 
-Ledger 控制台：uv run react-agent --user harry [--thread ID]。
+Ledger 控制台：uv run bookkeeping-agent --user harry [--thread ID]。
 📘 LEARN：图不依赖终端。调用方负责连接服务、流式展示节点更新、
 处理暂停与恢复，并提供检查命令。可以替换为网页入口而不修改图。
 """
@@ -23,13 +23,13 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.store.sqlite.aio import AsyncSqliteStore
 from langgraph.types import Command
 
-from agent_apps.react_agent.agent import memory
-from agent_apps.react_agent.agent.config import settings, user_data_dir
-from agent_apps.react_agent.agent.graph import build_graph
-from agent_apps.react_agent.agent.llm import get_chat_model
-from agent_apps.react_agent.agent.mcp_client import load_mcp_tools
-from agent_apps.react_agent.agent.state import AgentContext
-from agent_apps.react_agent.agent.tools import LOCAL_TOOLS
+from agent_apps.bookkeeping_agent.agent import memory
+from agent_apps.bookkeeping_agent.agent.config import settings, user_data_dir
+from agent_apps.bookkeeping_agent.agent.graph import build_graph
+from agent_apps.bookkeeping_agent.agent.llm import get_chat_model
+from agent_apps.bookkeeping_agent.agent.mcp_client import load_mcp_tools
+from agent_apps.bookkeeping_agent.agent.state import AgentContext
+from agent_apps.bookkeeping_agent.agent.tools import LOCAL_TOOLS
 
 DIM, BOLD, RESET = "\033[2m", "\033[1m", "\033[0m"
 CYAN, GREEN, YELLOW, RED, MAGENTA = (

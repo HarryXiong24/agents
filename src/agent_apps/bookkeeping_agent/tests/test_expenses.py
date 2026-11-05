@@ -8,9 +8,9 @@ from dataclasses import replace
 
 import pytest
 
-from agent_apps.react_agent.agent import mcp_client
-from agent_apps.react_agent.agent.tools import calculate_share
-from agent_apps.react_agent.mcp_servers import expense_server as ledger
+from agent_apps.bookkeeping_agent.agent import mcp_client
+from agent_apps.bookkeeping_agent.agent.tools import calculate_share
+from agent_apps.bookkeeping_agent.mcp_servers import expense_server as ledger
 
 
 @pytest.fixture(autouse=True)

@@ -15,7 +15,7 @@ from contextlib import contextmanager
 
 import pytest
 
-from agent_apps.react_agent.agent.config import PROJECT_ROOT
+from agent_apps.bookkeeping_agent.agent.config import PROJECT_ROOT
 
 pty = pytest.importorskip("pty", reason="Terminal integration tests require a POSIX PTY / 终端集成测试需要 POSIX PTY")
 
@@ -24,9 +24,9 @@ pty = pytest.importorskip("pty", reason="Terminal integration tests require a PO
 CLI_SCRIPT = """
 import sys
 from langchain_core.messages import AIMessage, ToolMessage
-from agent_apps.react_agent import main as console
-from agent_apps.react_agent.__main__ import main
-from agent_apps.react_agent.tests.fake_model import ScriptedChatModel, tool_call
+from agent_apps.bookkeeping_agent import main as console
+from agent_apps.bookkeeping_agent.__main__ import main
+from agent_apps.bookkeeping_agent.tests.fake_model import ScriptedChatModel, tool_call
 
 def respond(messages, tools_bound):
     if not any(isinstance(message, ToolMessage) for message in messages):
@@ -36,7 +36,7 @@ def respond(messages, tools_bound):
     return AIMessage('Recorded / 已记录。')
 
 console.get_chat_model = lambda: ScriptedChatModel(responder=respond)
-sys.argv = ['react-agent', '--user', 'cli-test', '--thread', 'durable-cli']
+sys.argv = ['bookkeeping-agent', '--user', 'cli-test', '--thread', 'durable-cli']
 main()
 """
 

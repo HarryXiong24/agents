@@ -79,9 +79,9 @@ Markers: `📘 LEARN` explains a concept; `⚠ PITFALL` points out a trap; `🧪
 
 ## 动手练习
 
-Use your own expense data. Write exercises change your local ledger after approval. For an isolated practice ledger, start with a separate user such as `uv run react-agent --user practice`. Offline tests automatically use temporary directories. Paired prompts below are alternatives.
+Use your own expense data. Write exercises change your local ledger after approval. For an isolated practice ledger, start with a separate user such as `uv run bookkeeping-agent --user practice`. Offline tests automatically use temporary directories. Paired prompts below are alternatives.
 
-使用你自己的支出数据。写操作练习在批准后会修改本地账本。需要独立练习账本时可使用 `uv run react-agent --user practice`。离线测试自动使用临时目录。下面的双语提示是同一请求的两种表达。
+使用你自己的支出数据。写操作练习在批准后会修改本地账本。需要独立练习账本时可使用 `uv run bookkeeping-agent --user practice`。离线测试自动使用临时目录。下面的双语提示是同一请求的两种表达。
 
 1. **Observe a local tool.** Ask “What percentage is $12.50 of $50?” Look for `calculate_share`, its observation and the final 25.00% answer. Use `/state` to inspect iterations; the exact count can vary with the model.
 
@@ -119,7 +119,7 @@ Use your own expense data. Write exercises change your local ledger after approv
 
    **让模型提问。** 说“帮我记一笔，但先问我金额”。观察 `ask_human` 及返回值，比较模型主动提问和策略审批。工具 docstring 会影响模型何时调用它。
 
-7. **Exhaust the step budget.** Start with `AGENT_MAX_ITERATIONS=2 uv run react-agent --user practice`. Request a weekly summary and a food percentage. If the steps are insufficient, the agent must explain what remains unfinished. Find the unbound-model call.
+7. **Exhaust the step budget.** Start with `AGENT_MAX_ITERATIONS=2 uv run bookkeeping-agent --user practice`. Request a weekly summary and a food percentage. If the steps are insufficient, the agent must explain what remains unfinished. Find the unbound-model call.
 
    **耗尽步骤预算。** 用上述较低预算启动，要求本周汇总及餐饮占比。步骤不足时 Agent 应说明未完成部分，找到最后一步不绑定工具的代码。
 

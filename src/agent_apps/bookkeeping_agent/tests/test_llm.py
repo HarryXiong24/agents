@@ -8,8 +8,8 @@ from dataclasses import replace
 import pytest
 from langchain_groq import ChatGroq
 
-from agent_apps.react_agent.agent import llm
-from agent_apps.react_agent.agent.tools import calculate_share
+from agent_apps.bookkeeping_agent.agent import llm
+from agent_apps.bookkeeping_agent.agent.tools import calculate_share
 
 
 def test_groq_model_supports_tool_binding(monkeypatch):

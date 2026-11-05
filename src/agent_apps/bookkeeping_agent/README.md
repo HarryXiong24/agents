@@ -24,7 +24,7 @@ From the repository root, set `GROQ_API_KEY` in `.env` or the environment, then 
 
 ```bash
 uv sync
-uv run react-agent --user harry
+uv run bookkeeping-agent --user harry
 ```
 
 The root `.env` loads automatically; exported environment variables take precedence. Optional settings are shown in [.env.example](.env.example); put them in the repository root `.env`. When updating an older installation, replace an old `AGENT_RISKY_TOOLS` value with `add_expense,update_expense,delete_expense`. Run `/tools` to confirm the three write tools have approval marks. Start with the first-session walkthrough in [LEARNING.md](LEARNING.md).
@@ -214,7 +214,7 @@ Commands: `/new`, `/threads`, `/switch ID`, `/state`, `/history`, `/memory`, `/f
 ## 5. 验证
 
 ```bash
-uv run python -m pytest src/agent_apps/react_agent/tests -q
+uv run python -m pytest src/agent_apps/bookkeeping_agent/tests -q
 ```
 
 Tests need no Groq API key. A scripted model drives the real graph and stdio MCP service with isolated temporary ledgers. Checks cover approvals, edits, rejection, clarification, persisted resume, exact money, filters, pagination, user separation, loop guards, timeouts, compaction, memory, reflection, example configuration, model configuration, and real terminal exit/restart after Ctrl+C. Terminal integration tests require a POSIX PTY and are skipped on platforms without one. This verifies mechanisms; bilingual response quality from a live model still needs manual evaluation with the paired examples above.

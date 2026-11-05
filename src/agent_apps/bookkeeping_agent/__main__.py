@@ -1,6 +1,6 @@
-"""Launch Ledger with `uv run react-agent` or `python -m agent_apps.react_agent`.
+"""Launch Ledger with `uv run bookkeeping-agent` or `python -m agent_apps.bookkeeping_agent`.
 
-通过 uv run react-agent 或 python -m agent_apps.react_agent 启动 Ledger。
+通过 uv run bookkeeping-agent 或 python -m agent_apps.bookkeeping_agent 启动 Ledger。
 """
 
 import asyncio

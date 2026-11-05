@@ -31,11 +31,11 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
 
-from agent_apps.react_agent.agent.config import settings, user_data_dir
-from agent_apps.react_agent.agent.graph import build_graph
-from agent_apps.react_agent.agent.mcp_client import load_mcp_tools
-from agent_apps.react_agent.agent.state import AgentContext
-from agent_apps.react_agent.agent.tools import LOCAL_TOOLS
+from agent_apps.bookkeeping_agent.agent.config import settings, user_data_dir
+from agent_apps.bookkeeping_agent.agent.graph import build_graph
+from agent_apps.bookkeeping_agent.agent.mcp_client import load_mcp_tools
+from agent_apps.bookkeeping_agent.agent.state import AgentContext
+from agent_apps.bookkeeping_agent.agent.tools import LOCAL_TOOLS
 from .fake_model import ScriptedChatModel, tool_call
 
 CTX = AgentContext(user_id="tester")
@@ -323,7 +323,7 @@ def test_example_configuration_requires_approval(mcp_tools, monkeypatch, tool_na
     加载项目自带的示例配置，验证写操作在执行前确实暂停。
     """
     from dotenv import dotenv_values
-    from agent_apps.react_agent.agent.config import ROOT, Settings
+    from agent_apps.bookkeeping_agent.agent.config import ROOT, Settings
 
     example = dotenv_values(ROOT / ".env.example")
     monkeypatch.setenv("AGENT_RISKY_TOOLS", example["AGENT_RISKY_TOOLS"])
@@ -478,7 +478,7 @@ def test_console_resumes_approval_after_sqlite_reopen(mcp_tools, tmp_path, monke
     接受新消息前恢复落盘的审批，且只执行一次写入。
     """
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-    from agent_apps.react_agent import main as console
+    from agent_apps.bookkeeping_agent import main as console
 
     def responder(msgs, tools_bound):
         if not turn_tool_msgs(msgs):
@@ -597,7 +597,7 @@ def test_parallel_questions_recover_with_one_combined_interrupt(monkeypatch):
 
     拒绝有歧义的并行中断，再恢复合并后的一次提问。
     """
-    from agent_apps.react_agent import main as console
+    from agent_apps.bookkeeping_agent import main as console
     questions = ["Amount? / 金额？", "Category? / 分类？"]
     combined = "Amount and category? / 金额和分类？"
 
