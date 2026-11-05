@@ -5,7 +5,8 @@ from pathlib import Path
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-CHECKPOINTS_FILE = Path(__file__).resolve().parent / "data" / "checkpoints.sqlite"
+# Use a fresh conversation store so removed tool names cannot be resumed from old data.
+CHECKPOINTS_FILE = Path(__file__).resolve().parent / "data" / "todo_checkpoints.sqlite"
 
 
 def list_threads(checkpointer: SqliteSaver) -> list[str]:

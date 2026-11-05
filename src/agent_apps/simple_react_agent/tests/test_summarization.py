@@ -29,9 +29,9 @@ from agent_apps.simple_react_agent.summarization import (
 
 @pytest.fixture(autouse=True)
 def isolate_storage(tmp_path, monkeypatch):
-    monkeypatch.setattr(memory, "DATABASE_FILE", tmp_path / "plans.sqlite")
+    monkeypatch.setattr(memory, "DATABASE_FILE", tmp_path / "todos.sqlite")
     monkeypatch.setattr(
-        checkpoints, "CHECKPOINTS_FILE", tmp_path / "checkpoints.sqlite"
+        checkpoints, "CHECKPOINTS_FILE", tmp_path / "todo_checkpoints.sqlite"
     )
     monkeypatch.delenv("SUMMARY_TRIGGER_TOKENS", raising=False)
     monkeypatch.setattr(config, "ENV_FILE", tmp_path / ".env")
@@ -170,7 +170,7 @@ def test_unfinished_or_malformed_tool_exchanges_are_not_compacted():
         AIMessage(content="Incomplete", response_metadata={"finish_reason": "length"}),
         AIMessage(
             content="",
-            tool_calls=[{"name": "delete_study_plan", "args": {}, "id": "bad"}],
+            tool_calls=[{"name": "delete_todo", "args": {}, "id": "bad"}],
         ),
     ],
 )
@@ -183,7 +183,7 @@ def test_invalid_summary_keeps_original_state(response):
         summarize_conversation(state, model, SummaryConfig(trigger_tokens=1))
     assert [m.id for m in state["messages"]] == [m.id for m in messages]
     assert state["summary"] == "Existing summary"
-    assert memory.load_plans() == []
+    assert memory.load_todos() == []
 
 
 def test_non_shortening_summary_skips_compaction_and_preserves_old_summary():
@@ -209,7 +209,7 @@ def test_long_current_input_does_not_trap_short_history_on_restart(
         ["Hi", "Hello", "Thanks", "Explain decorators carefully. " * 100, "exit"]
     )
     monkeypatch.setattr("builtins.input", lambda _: next(inputs))
-    database = str(tmp_path / "checkpoints.sqlite")
+    database = str(tmp_path / "todo_checkpoints.sqlite")
     config: RunnableConfig = {"configurable": {"thread_id": "short-history"}}
 
     with SqliteSaver.from_conn_string(database) as saver:
@@ -238,17 +238,19 @@ def test_long_current_input_does_not_trap_short_history_on_restart(
     assert "Context: Earlier conversation summarized" not in output
 
 
-def test_rolling_summary_and_current_plan_list_reach_model_without_old_messages(
+def test_rolling_summary_and_current_todo_list_reach_model_without_old_messages(
     tmp_path,
 ):
-    memory.save_plan("Python", 60, "2026-10-29")
+    memory.save_todo("Python", 60, "2026-10-29")
     model, bound = make_model()
     model.invoke.side_effect = [
         AIMessage(content="First summary."),
         AIMessage(content="Updated summary."),
     ]
     config: RunnableConfig = {"configurable": {"thread_id": "rolling"}}
-    with SqliteSaver.from_conn_string(str(tmp_path / "checkpoints.sqlite")) as saver:
+    with SqliteSaver.from_conn_string(
+        str(tmp_path / "todo_checkpoints.sqlite")
+    ) as saver:
         graph = build_graph(model, saver, SummaryConfig(trigger_tokens=1))
         first_id = None
         for number in range(1, 6):
@@ -274,20 +276,20 @@ def test_rolling_summary_and_current_plan_list_reach_model_without_old_messages(
             first_id in {m.id for m in s.values.get("messages", [])}
             for s in graph.get_state_history(config)
         )
-        # Another conversation shares plans, but not this summary.
+        # Another conversation shares todos, but not this summary.
         graph.invoke(
             {"messages": [HumanMessage("Other thread")]},
             {"configurable": {"thread_id": "other"}},
         )
         assert "Updated summary." not in bound.invoke.call_args.args[0][0].content
-    assert memory.load_plans() == [
+    assert memory.load_todos() == [
         {"project": "Python", "minutes": 60, "date": "2026-10-29"}
     ]
     model.bind_tools.assert_called_once()
 
 
 def test_summary_failure_is_checkpointed_without_deletion_and_can_resume(tmp_path):
-    database = str(tmp_path / "checkpoints.sqlite")
+    database = str(tmp_path / "todo_checkpoints.sqlite")
     config: RunnableConfig = {"configurable": {"thread_id": "recover"}}
     model, _ = make_model()
     model.invoke.side_effect = APIConnectionError(
@@ -316,7 +318,7 @@ def test_summary_failure_is_checkpointed_without_deletion_and_can_resume(tmp_pat
 
 
 def test_version_4_checkpoint_without_summary_still_opens(tmp_path):
-    database = str(tmp_path / "checkpoints.sqlite")
+    database = str(tmp_path / "todo_checkpoints.sqlite")
     config: RunnableConfig = {"configurable": {"thread_id": "old"}}
     with SqliteSaver.from_conn_string(database) as saver:
         old = StateGraph(MessagesState)
@@ -347,7 +349,9 @@ def test_console_reports_compaction_without_printing_summary(
     model.invoke.return_value = AIMessage(content="Private learning goal.")
     inputs = iter([*("My learning goal " * 30 for _ in range(4)), "exit"])
     monkeypatch.setattr("builtins.input", lambda _: next(inputs))
-    with SqliteSaver.from_conn_string(str(tmp_path / "checkpoints.sqlite")) as saver:
+    with SqliteSaver.from_conn_string(
+        str(tmp_path / "todo_checkpoints.sqlite")
+    ) as saver:
         console.chat(build_graph(model, saver, SummaryConfig(trigger_tokens=1)))
     output = capsys.readouterr().out
     assert output.count("Context: Earlier conversation summarized") == 1
@@ -365,13 +369,13 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from agent_apps.simple_react_agent import memory
 from agent_apps.simple_react_agent.config import SummaryConfig
 from agent_apps.simple_react_agent.graph import build_graph
-memory.DATABASE_FILE = Path(sys.argv[1]) / "plans.sqlite"
+memory.DATABASE_FILE = Path(sys.argv[1]) / "todos.sqlite"
 model = Mock(spec=BaseChatModel)
 bound = Mock()
 bound.invoke.side_effect = lambda _: AIMessage(content="Noted.")
 model.bind_tools.return_value = bound
 model.invoke.return_value = AIMessage(content="Python goal.")
-with SqliteSaver.from_conn_string(str(Path(sys.argv[1]) / "checkpoints.sqlite")) as saver:
+with SqliteSaver.from_conn_string(str(Path(sys.argv[1]) / "todo_checkpoints.sqlite")) as saver:
     graph = build_graph(model, saver, SummaryConfig(trigger_tokens=1))
     for i in range(4):
         graph.invoke({"messages": [HumanMessage("I want to study Python. " * 20)]}, {"configurable": {"thread_id": "persisted"}})
@@ -384,7 +388,9 @@ with SqliteSaver.from_conn_string(str(Path(sys.argv[1]) / "checkpoints.sqlite"))
         text=True,
     )
     model, bound = make_model()
-    with SqliteSaver.from_conn_string(str(tmp_path / "checkpoints.sqlite")) as saver:
+    with SqliteSaver.from_conn_string(
+        str(tmp_path / "todo_checkpoints.sqlite")
+    ) as saver:
         graph = build_graph(model, saver, SummaryConfig(trigger_tokens=100_000))
         graph.invoke(
             {"messages": [HumanMessage("What was my goal?")]},

@@ -1,4 +1,4 @@
-"""Local tools for time, arithmetic, and todos; legacy tool names stay compatible."""
+"""Local tools for time, arithmetic, and todo management."""
 
 import math
 from datetime import datetime
@@ -49,7 +49,7 @@ def calculate(
 
 
 @tool
-def save_study_plan(project: str, minutes: int, date: str) -> str:
+def save_todo(project: str, minutes: int, date: str) -> str:
     """Add or update a todo across restarts when the user explicitly requests it.
 
     project is the todo name, minutes is its estimated duration from 1 to 1440,
@@ -57,18 +57,17 @@ def save_study_plan(project: str, minutes: int, date: str) -> str:
     Example: project="Clean room", minutes=30, date="2026-11-04".
     Ask for missing fields. Resolve relative dates with the time tool and convert hours to minutes.
     The same name and date updates duration; a different name or date adds a todo.
-    This tool does not rename, reschedule, or mark todos complete. Its legacy name
-    is retained so historical tool calls and unfinished checkpoints still work.
+    This tool does not rename, reschedule, or mark todos complete.
     """
     # Report success only after the write; the tool node handles execution errors.
-    plan = memory.save_plan(project, minutes, date)
-    result = f"Saved todo: {plan['project']}, estimated {plan['minutes']} minutes, scheduled for {plan['date']}."
+    todo = memory.save_todo(project, minutes, date)
+    result = f"Saved todo: {todo['project']}, estimated {todo['minutes']} minutes, scheduled for {todo['date']}."
     print(f"Tool: {result}")
     return result
 
 
 @tool
-def delete_study_plan(project: str, date: str) -> str:
+def delete_todo(project: str, date: str) -> str:
     """Delete a todo by name and scheduled date only when explicitly requested.
 
     project is the todo name; date must use YYYY-MM-DD. Duration is not required.
@@ -76,9 +75,8 @@ def delete_study_plan(project: str, date: str) -> str:
     Ask if the name or date is unclear; resolve relative dates with the time tool.
     Delete only the matching todo. If missing, report that and preserve other todos.
     Saying a todo is done does not authorize deletion; there is no completion field.
-    The legacy tool name is retained for historical calls and checkpoints.
     """
-    deleted = memory.delete_plan(project, date)
+    deleted = memory.delete_todo(project, date)
     if deleted:
         result = f"Deleted todo: {project.strip()}, {date}."
     else:
@@ -89,4 +87,4 @@ def delete_study_plan(project: str, date: str) -> str:
 
 # All tools run locally. Both model binding and the tool node use this list.
 # Adding a tool here does not require changing the graph's edges.
-TOOLS = [get_current_time, calculate, save_study_plan, delete_study_plan]
+TOOLS = [get_current_time, calculate, save_todo, delete_todo]

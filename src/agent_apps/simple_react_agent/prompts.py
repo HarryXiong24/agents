@@ -1,9 +1,9 @@
-"""Read Markdown templates and format todos using the legacy three-field records."""
+"""Read Markdown templates and format the current todo list and conversation summary."""
 
 import json
 from pathlib import Path
 
-from .memory import StudyPlan
+from .memory import TodoItem
 
 # Keep Markdown assets separate from the Python prompt loader.
 PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parent / "prompt_templates"
@@ -22,11 +22,11 @@ SUMMARY_PROMPT = (
 )
 
 
-def build_system_prompt(plans: list[StudyPlan], summary: str = "") -> str:
-    """Format the current todo list and summary; keep legacy record keys unchanged."""
-    # Only the template's {plans} is replaced; braces in plan data are not parsed again.
+def build_system_prompt(todos: list[TodoItem], summary: str = "") -> str:
+    """Format the current todo list and optional conversation summary."""
+    # Only the template's {todos} is replaced; braces in todo data are not parsed again.
     memory_prompt = TODO_LIST_PROMPT.format(
-        plans=json.dumps(plans, ensure_ascii=False, indent=2)
+        todos=json.dumps(todos, ensure_ascii=False, indent=2)
     )
     system = SYSTEM_PROMPT + "\n\n" + memory_prompt
     if summary:

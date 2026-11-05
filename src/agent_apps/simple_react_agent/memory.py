@@ -1,4 +1,4 @@
-"""Store todos in the original study-plan database without schema or record migration."""
+"""Validate todos and persist them in a local SQLite database."""
 
 import sqlite3
 from collections.abc import Generator
@@ -8,80 +8,80 @@ from pathlib import Path
 from typing import TypedDict
 
 # Anchor the path to this module so changing the working directory has no effect.
-DATABASE_FILE = Path(__file__).resolve().parent / "data" / "study_plans.sqlite"
+DATABASE_FILE = Path(__file__).resolve().parent / "data" / "todos.sqlite"
 
 
-class StudyPlan(TypedDict):
-    """Legacy record name: project is the todo name, minutes its estimate, date its schedule."""
+class TodoItem(TypedDict):
+    """A todo has a name, an estimated duration, and a scheduled date."""
 
     project: str
     minutes: int
     date: str
 
 
-def _validate_plan_key(project: str, planned_date: str) -> tuple[str, str]:
-    """Project and date identify a plan; reads and writes share this validation."""
+def _validate_todo_key(project: str, scheduled_date: str) -> tuple[str, str]:
+    """Project and date identify a todo; reads and writes share this validation."""
     if not isinstance(project, str):
         raise TypeError("The todo name must be a string.")
     project = project.strip()
     if not project:
         raise ValueError("The todo name must not be empty.")
-    if not isinstance(planned_date, str):
+    if not isinstance(scheduled_date, str):
         raise TypeError("The scheduled date must be a string.")
     try:
-        parsed_date = calendar_date.fromisoformat(planned_date)
+        parsed_date = calendar_date.fromisoformat(scheduled_date)
     except ValueError as exc:
         raise ValueError(
             "The scheduled date must be a valid date in YYYY-MM-DD format."
         ) from exc
     # fromisoformat accepts other ISO forms; require the full calendar date here.
-    if parsed_date.isoformat() != planned_date:
+    if parsed_date.isoformat() != scheduled_date:
         raise ValueError("The scheduled date must use YYYY-MM-DD format.")
-    return project, planned_date
+    return project, scheduled_date
 
 
-def _validate_plan(project: str, minutes: int, planned_date: str) -> StudyPlan:
+def _validate_todo(project: str, minutes: int, scheduled_date: str) -> TodoItem:
     """Use TypeError for invalid types and ValueError for invalid values."""
-    project, planned_date = _validate_plan_key(project, planned_date)
+    project, scheduled_date = _validate_todo_key(project, scheduled_date)
     if type(minutes) is not int:
         raise TypeError("Estimated duration must be an integer number of minutes.")
     if not 1 <= minutes <= 1440:
         raise ValueError("Estimated duration must be between 1 and 1440 minutes.")
-    return {"project": project, "minutes": minutes, "date": planned_date}
+    return {"project": project, "minutes": minutes, "date": scheduled_date}
 
 
-def load_plans() -> list[StudyPlan]:
-    """Return all plans in insertion order, or an empty list if there are none."""
+def load_todos() -> list[TodoItem]:
+    """Return all todos in insertion order, or an empty list if there are none."""
     with _connect() as connection:
         rows = connection.execute(
-            "SELECT project, minutes, date FROM study_plans ORDER BY rowid"
+            "SELECT project, minutes, date FROM todos ORDER BY rowid"
         ).fetchall()
-    # sqlite3.Row supports column names; keep version 2's return shape for prompts.
-    return [_validate_plan(row["project"], row["minutes"], row["date"]) for row in rows]
+    # sqlite3.Row supports column names; prompts receive ordinary dictionaries.
+    return [_validate_todo(row["project"], row["minutes"], row["date"]) for row in rows]
 
 
-def save_plan(project: str, minutes: int, planned_date: str) -> StudyPlan:
-    """Insert a plan or update its duration when project and date already exist."""
-    plan = _validate_plan(project, minutes, planned_date)
+def save_todo(project: str, minutes: int, scheduled_date: str) -> TodoItem:
+    """Insert a todo or update its duration when project and date already exist."""
+    todo = _validate_todo(project, minutes, scheduled_date)
     with _connect() as connection:
         # Bind values using ? parameters, including project names containing quotes.
         # Update only duration on a key conflict, preserving insertion order.
         connection.execute(
-            """INSERT INTO study_plans (project, minutes, date) VALUES (?, ?, ?)
+            """INSERT INTO todos (project, minutes, date) VALUES (?, ?, ?)
             ON CONFLICT(project, date) DO UPDATE SET minutes = excluded.minutes""",
-            (plan["project"], plan["minutes"], plan["date"]),
+            (todo["project"], todo["minutes"], todo["date"]),
         )
     # Return only after the transaction commits so tools can report success.
-    return plan
+    return todo
 
 
-def delete_plan(project: str, planned_date: str) -> bool:
+def delete_todo(project: str, scheduled_date: str) -> bool:
     """Delete by project and date; return True if deleted, otherwise False."""
-    project, planned_date = _validate_plan_key(project, planned_date)
+    project, scheduled_date = _validate_todo_key(project, scheduled_date)
     with _connect() as connection:
         result = connection.execute(
-            "DELETE FROM study_plans WHERE project = ? AND date = ?",
-            (project, planned_date),
+            "DELETE FROM todos WHERE project = ? AND date = ?",
+            (project, scheduled_date),
         )
         deleted = result.rowcount > 0
     return deleted
@@ -97,7 +97,7 @@ def _connect() -> Generator[sqlite3.Connection]:
         # The connection context manages transactions; closing releases the connection.
         with connection:
             connection.execute(
-                """CREATE TABLE IF NOT EXISTS study_plans (
+                """CREATE TABLE IF NOT EXISTS todos (
                     project TEXT NOT NULL CHECK (length(trim(project)) > 0),
                     minutes INTEGER NOT NULL
                         CHECK (typeof(minutes) = 'integer' AND minutes BETWEEN 1 AND 1440),

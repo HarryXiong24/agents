@@ -4,7 +4,7 @@ English | [简体中文](VERSIONS.zh-CN.md)
 
 This document records what each version teaches, what it adds, and how to verify it. Append the same information when a future version adds another building block.
 
-The running code is **version 5**, adding rolling summaries to SQLite-backed conversations and stored records. The current assistant manages todos using the existing study-plan storage. Versions 1 through 4 describe the learning history, not separate runnable directories. Follow version 5 when reading the current context-management code.
+The running code is **version 5**, adding rolling summaries to SQLite-backed conversations and stored records. The current assistant uses Todo names throughout its tools, functions, types, and new SQLite storage. Historical study-plan identifiers below describe earlier versions; current names are listed in version 5. Versions 1 through 4 describe the learning history, not separate runnable directories. Follow version 5 when reading the current context-management code.
 
 Code, prompts, tool descriptions, and terminal messages use English. The assistant replies in English by default, with another language available on explicit request. Exit with `exit` or `quit`.
 
@@ -500,9 +500,9 @@ See the official [LangGraph persistence guide](https://docs.langchain.com/oss/py
 
 Distinguish saved checkpoints, the current graph state, and the context sent to the model. Compress older completed conversations into a rolling summary while keeping recent turns verbatim. The conversation menu, SQLite saver, four tools, and three-field stored records remain unchanged. The earlier execution-budget proposal is not part of this version.
 
-### Todo theme adjustment before version 6
+### Todo naming and storage adjustment before version 6
 
-The application now presents Todo List Assistant for home, work, and learning tasks. This is a prompt/copy adjustment within version 5; version 6 execution budgets are not implemented.
+The application now presents Todo List Assistant for home, work, and learning tasks. This includes prompts, tool/function/type names, and fresh database files within version 5; version 6 execution budgets are not implemented.
 
 | Existing field | Current meaning |
 |---|---|
@@ -512,9 +512,20 @@ The application now presents Todo List Assistant for home, work, and learning ta
 
 Adding, listing/filtering, updating duration, deleting, and duration calculations use the existing code paths. There is no completion/status field, so saying a todo is done does not authorize deletion or persist completion. The same name/date updates duration only; a new name/date creates another record rather than renaming or rescheduling the original.
 
-`data/study_plans.sqlite`, the `study_plans` table, all record fields, `StudyPlan`, storage function names, and tool names `save_study_plan`/`delete_study_plan` are retained. Existing records appear as todos without migration or duplication. The change does not rewrite stored messages, IDs, summaries, or checkpoints. Normal summary compression still runs on later user turns. Older versions above remain historical learning records.
+Current naming is consistent across layers:
 
-The current list template is `prompt_templates/todo_list_prompt.md`, loaded as `TODO_LIST_PROMPT`; it retains the `{plans}` placeholder for formatting existing dictionaries. System instructions, tool descriptions, current return messages, and console labels use todo wording. Summary instructions preserve the meaning of older study discussions and operations. The package and launch command retain their existing names.
+| Layer | Current name |
+|---|---|
+| Record type | `TodoItem` |
+| Storage functions in `memory.py` | `load_todos()`, `save_todo()`, `delete_todo()` |
+| Model-facing tools in `tools.py` | `save_todo`, `delete_todo` |
+| Todo database and table | `data/todos.sqlite`, `todos` |
+| Conversations and summaries | `data/todo_checkpoints.sqlite` |
+| List template and placeholder | `prompt_templates/todo_list_prompt.md`, `{todos}` |
+
+There are no legacy tool aliases or data migrations. Todo records and conversations start empty in the new files, then persist across restarts. Old `data/study_plans.sqlite`, `data/checkpoints.sqlite`, and JSON files are ignored and can be deleted manually. LangGraph still manages its own checkpoint table names through `SqliteSaver`.
+
+`TODO_LIST_PROMPT` loads the todo template. System instructions, tool descriptions, return messages, console labels, and summary instructions use todo wording. The package and launch command keep their generic names. Versions 1-4 above remain historical learning records, with their original identifiers.
 
 ### Component diagram
 
@@ -530,8 +541,8 @@ flowchart TD
     M -->|Tool requests| T[Tool node]
     T -->|Results within the same turn| M
     M -->|Final answer| E[END]
-    CP[SQLite Checkpointer] <-->|Summary and recent messages| S
-    P[Current todo database - legacy study_plans] -->|Read before each response-model call| M
+    CP[SQLite Checkpointer - todo_checkpoints.sqlite] <-->|Summary and recent messages| S
+    P[Current todo database - todos.sqlite] -->|Read before each response-model call| M
     SP[New: summary_prompt.md and unbound base model] --> S
     classDef changed fill:#fff3df,stroke:#c76a00,stroke-width:2px;
     class S,CFG,U,SP changed;
@@ -562,7 +573,7 @@ The estimator uses `count_tokens_approximately()` with its character-based defau
 
 ### State and rolling updates
 
-`AgentState` extends `MessagesState` with an optional `summary`. Old checkpoints have no summary and use an empty string. No database migration is needed.
+`AgentState` extends `MessagesState` with an optional `summary`. A state without this field uses an empty string. Previous database files are not loaded by the Todo application.
 
 Before user turn 5, for example:
 
@@ -606,7 +617,7 @@ The summary text itself is not printed. Current saved todos always come from SQL
 | `console.py` | Show compaction and summary errors without printing summary contents |
 | `tests/test_summarization.py` | Threshold boundaries, durable rolling state, and failure recovery |
 | `tests/test_config.py` | Isolation from outer files, process variables, and the current working directory |
-| `tests/test_todo_compatibility.py` | Todo copy and CRUD, original records, and resuming legacy tool calls without rewriting old messages or summary |
+| `tests/test_todos.py` | Fresh databases ignoring old files, todo prompts and tool contracts, CRUD, and pending todo-tool recovery across restarts |
 
 Read in the table's order, then trace one ordinary turn, one turn that triggers summary generation, and one tool-using turn. Summarization adds a model request only when needed, so it adds some cost and latency.
 
@@ -620,7 +631,7 @@ File reading, parsing, and validation form one configuration-loading responsibil
 4. Create another conversation and verify the summary is not shared; saved todos are shared.
 5. Raise `SUMMARY_TRIGGER_TOKENS` to 6000, restart, and compare trigger frequency.
 
-Offline tests cover local configuration isolation from parent files and process variables, the exact trigger boundary, no compression without eligible turns, JSON serialization of tool exchanges, rolling summary updates, invalid-summary preservation, skipping non-shortening summaries, continuing and reopening a short conversation after a long input, cross-process restoration, version 4 checkpoint compatibility, conversation isolation, and unchanged todo CRUD.
+Offline tests cover local configuration isolation from parent files and process variables, the exact trigger boundary, no compression without eligible turns, JSON serialization of tool exchanges, rolling summary updates, invalid-summary preservation, skipping non-shortening summaries, continuing and reopening a short conversation after a long input, cross-process restoration, states without an initial summary, conversation isolation, and unchanged todo CRUD.
 
 This version compacts the latest state and model input. Older checkpoint snapshots are retained, so the SQLite file is not automatically reduced. Large individual inputs, very long retained turns, and huge preexisting archives can still exceed model capacity; chunked summarization and strict context budgets are outside this version.
 

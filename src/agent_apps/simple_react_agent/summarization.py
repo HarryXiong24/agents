@@ -25,7 +25,7 @@ class SummaryError(ValueError):
 
 
 def estimate_history_tokens(messages: Sequence[BaseMessage], summary: str = "") -> int:
-    """Estimate history only; exclude system instructions, plan data, and schemas."""
+    """Estimate history only; exclude system instructions, todo data, and schemas."""
     history = [SystemMessage(content=summary), *messages] if summary else messages
     return count_tokens_approximately(history)
 
@@ -80,7 +80,7 @@ def summarize_conversation(
         raise SummaryError("Cannot summarize messages without persistent IDs.")
 
     # Serialize tool exchanges as data rather than sending executable tool messages
-    # to the summarizer. No tool binding or live plan database is used here.
+    # to the summarizer. No tool binding or live todo database is used here.
     transcript = []
     for message in older:
         entry: dict[str, Any] = {"role": message.type, "content": message.content}

@@ -28,8 +28,8 @@ def build_graph(
     def call_model(state: AgentState):
         # Version 3: query SQLite before every model call, including after writes.
         # Putting the records in the prompt makes them available to the model.
-        plans = memory.load_plans()
-        system = build_system_prompt(plans, state.get("summary", ""))
+        todos = memory.load_todos()
+        system = build_system_prompt(todos, state.get("summary", ""))
         # Send system instructions with each request without appending to history.
         response = model_with_tools.invoke([SystemMessage(system), *state["messages"]])
         # MessagesState appends new message IDs and replaces matching IDs.

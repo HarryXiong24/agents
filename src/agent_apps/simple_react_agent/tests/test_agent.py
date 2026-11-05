@@ -20,26 +20,26 @@ from agent_apps.simple_react_agent import model as model_config
 from agent_apps.simple_react_agent.graph import build_graph
 from agent_apps.simple_react_agent.tools import (
     calculate,
-    delete_study_plan,
+    delete_todo,
     get_current_time,
 )
 
 
 @pytest.fixture(autouse=True)
-def isolate_plans(tmp_path, monkeypatch):
-    """Use a temporary database without reading or changing personal study plans."""
+def isolate_todos(tmp_path, monkeypatch):
+    """Use a temporary database without reading or changing personal todos."""
+    monkeypatch.setattr(memory, "DATABASE_FILE", tmp_path / "data" / "todos.sqlite")
     monkeypatch.setattr(
-        memory, "DATABASE_FILE", tmp_path / "data" / "study_plans.sqlite"
-    )
-    monkeypatch.setattr(
-        checkpoints, "CHECKPOINTS_FILE", tmp_path / "data" / "checkpoints.sqlite"
+        checkpoints, "CHECKPOINTS_FILE", tmp_path / "data" / "todo_checkpoints.sqlite"
     )
     monkeypatch.setattr(config, "ENV_FILE", tmp_path / ".env")
 
 
 @pytest.fixture
 def checkpointer(tmp_path):
-    with SqliteSaver.from_conn_string(str(tmp_path / "checkpoints.sqlite")) as saver:
+    with SqliteSaver.from_conn_string(
+        str(tmp_path / "todo_checkpoints.sqlite")
+    ) as saver:
         yield saver
 
 
@@ -211,14 +211,14 @@ def test_console_keeps_failed_turn_and_resumes_before_new_input(
     "error",
     [
         OSError("Read failed"),
-        ValueError("Invalid plan value"),
-        TypeError("Invalid plan type"),
+        ValueError("Invalid todo value"),
+        TypeError("Invalid todo type"),
     ],
 )
 def test_console_handles_expected_data_errors(monkeypatch, capsys, error):
     graph = make_idle_graph()
     graph.invoke.side_effect = error
-    inputs = iter(["Please read my plans", "exit"])
+    inputs = iter(["Please read my todos", "exit"])
     monkeypatch.setattr("builtins.input", lambda _: next(inputs))
     console.chat(graph)
     assert "Check the todo storage or your input" in capsys.readouterr().out
@@ -267,53 +267,53 @@ def test_missing_api_key_has_english_error(monkeypatch):
 
 
 def test_save_tool_refreshes_prompt_and_survives_new_graph():
-    plan = {"project": "Python", "minutes": 60, "date": "2026-10-29"}
+    todo = {"project": "Python", "minutes": 60, "date": "2026-10-29"}
     first_model = make_model(
         AIMessage(
             content="",
             tool_calls=[
                 {
-                    "name": "save_study_plan",
-                    "args": plan,
+                    "name": "save_todo",
+                    "args": todo,
                     "id": "save",
                 }
             ],
         ),
-        AIMessage(content="Saved a 60-minute Python plan for October 29."),
+        AIMessage(content="Saved a 60-minute Python todo for October 29."),
     )
     build_graph(first_model).invoke(
-        {"messages": [HumanMessage("Save a 60-minute Python plan for 2026-10-29.")]}
+        {"messages": [HumanMessage("Save a 60-minute Python todo for 2026-10-29.")]}
     )
-    assert memory.load_plans() == [plan]
-    # The next model call in the same turn must see the newly saved plan.
+    assert memory.load_todos() == [todo]
+    # The next model call in the same turn must see the newly saved todo.
     assert (
-        json.dumps([plan], ensure_ascii=False, indent=2)
+        json.dumps([todo], ensure_ascii=False, indent=2)
         in first_model.invoke.call_args_list[1].args[0][0].content
     )
 
     second_model = make_model(
-        AIMessage(content="Your Python plan on October 29 is 60 minutes.")
+        AIMessage(content="Your Python todo on October 29 is 60 minutes.")
     )
     result = build_graph(second_model).invoke(
-        {"messages": [HumanMessage("What study plans do I have?")]}
+        {"messages": [HumanMessage("What todos do I have?")]}
     )
-    # A new graph with no chat history still receives persisted plans in its prompt.
+    # A new graph with no chat history still receives persisted todos in its prompt.
     assert (
-        json.dumps([plan], ensure_ascii=False, indent=2)
+        json.dumps([todo], ensure_ascii=False, indent=2)
         in second_model.invoke.call_args.args[0][0].content
     )
     assert len(result["messages"]) == 2
 
 
-def test_updated_plan_reaches_next_model_request():
-    memory.save_plan("Python", 30, "2026-10-29")
+def test_updated_todo_reaches_next_model_request():
+    memory.save_todo("Python", 30, "2026-10-29")
     updated = {"project": "Python", "minutes": 45, "date": "2026-10-29"}
     model = make_model(
         AIMessage(
             content="",
             tool_calls=[
                 {
-                    "name": "save_study_plan",
+                    "name": "save_todo",
                     "args": updated,
                     "id": "update",
                 }
@@ -325,18 +325,18 @@ def test_updated_plan_reaches_next_model_request():
         {
             "messages": [
                 HumanMessage(
-                    "Update the Python plan on 2026-10-29 to 45 minutes and save it."
+                    "Update the Python todo on 2026-10-29 to 45 minutes and save it."
                 )
             ]
         }
     )
     assert '"minutes": 30' in model.invoke.call_args_list[0].args[0][0].content
     assert '"minutes": 45' in model.invoke.call_args_list[1].args[0][0].content
-    assert memory.load_plans() == [updated]
+    assert memory.load_todos() == [updated]
 
 
-def test_temporary_calculation_keeps_saved_plans():
-    saved = memory.save_plan("Python", 45, "2026-10-29")
+def test_temporary_calculation_keeps_saved_todos():
+    saved = memory.save_todo("Python", 45, "2026-10-29")
     model = make_model(
         AIMessage(
             content="",
@@ -362,20 +362,20 @@ def test_temporary_calculation_keeps_saved_plans():
         }
     )
     assert result["messages"][2].content == "60.0"
-    assert memory.load_plans() == [saved]
+    assert memory.load_todos() == [saved]
 
 
 def test_failed_save_does_not_report_success(monkeypatch, capsys):
-    def fail_save(project, minutes, planned_date):
+    def fail_save(project, minutes, scheduled_date):
         raise OSError("Simulated disk write failure")
 
-    monkeypatch.setattr(memory, "save_plan", fail_save)
+    monkeypatch.setattr(memory, "save_todo", fail_save)
     model = make_model(
         AIMessage(
             content="",
             tool_calls=[
                 {
-                    "name": "save_study_plan",
+                    "name": "save_todo",
                     "args": {"project": "Python", "minutes": 30, "date": "2026-10-29"},
                     "id": "save-failed",
                 }
@@ -384,15 +384,15 @@ def test_failed_save_does_not_report_success(monkeypatch, capsys):
         AIMessage(content="Saving failed. Please try again later."),
     )
     result = build_graph(model).invoke(
-        {"messages": [HumanMessage("Save a 30-minute Python plan for 2026-10-29.")]}
+        {"messages": [HumanMessage("Save a 30-minute Python todo for 2026-10-29.")]}
     )
     assert result["messages"][2].status == "error"
     assert "Saved" not in capsys.readouterr().out
-    assert memory.load_plans() == []
+    assert memory.load_todos() == []
 
 
-def test_one_batch_can_save_multiple_plans():
-    plans = [
+def test_one_batch_can_save_multiple_todos():
+    todos = [
         {"project": "Python", "minutes": 60, "date": "2026-10-29"},
         {"project": "English", "minutes": 30, "date": "2026-10-29"},
     ]
@@ -400,17 +400,17 @@ def test_one_batch_can_save_multiple_plans():
         AIMessage(
             content="",
             tool_calls=[
-                {"name": "save_study_plan", "args": plan, "id": f"save-{index}"}
-                for index, plan in enumerate(plans)
+                {"name": "save_todo", "args": todo, "id": f"save-{index}"}
+                for index, todo in enumerate(todos)
             ],
         ),
-        AIMessage(content="Saved two plans."),
+        AIMessage(content="Saved two todos."),
     )
     result = build_graph(model).invoke(
-        {"messages": [HumanMessage("Please save both plans.")]}
+        {"messages": [HumanMessage("Please save both todos.")]}
     )
-    assert sorted(memory.load_plans(), key=lambda plan: plan["project"]) == sorted(
-        plans, key=lambda plan: plan["project"]
+    assert sorted(memory.load_todos(), key=lambda todo: todo["project"]) == sorted(
+        todos, key=lambda todo: todo["project"]
     )
     assert (
         len(
@@ -425,46 +425,46 @@ def test_one_batch_can_save_multiple_plans():
 
 
 def test_delete_tool_refreshes_prompt_and_survives_new_graph():
-    memory.save_plan("Python", 60, "2026-10-29")
-    remaining = memory.save_plan("English", 30, "2026-10-29")
+    memory.save_todo("Python", 60, "2026-10-29")
+    remaining = memory.save_todo("English", 30, "2026-10-29")
     model = make_model(
         AIMessage(
             content="",
             tool_calls=[
                 {
-                    "name": "delete_study_plan",
+                    "name": "delete_todo",
                     "args": {"project": "Python", "date": "2026-10-29"},
                     "id": "delete",
                 }
             ],
         ),
-        AIMessage(content="Deleted the Python plan."),
+        AIMessage(content="Deleted the Python todo."),
     )
     result = build_graph(model).invoke(
-        {"messages": [HumanMessage("Delete the Python plan for 2026-10-29.")]}
+        {"messages": [HumanMessage("Delete the Python todo for 2026-10-29.")]}
     )
     assert "Deleted todo" in result["messages"][2].content
-    assert memory.load_plans() == [remaining]
+    assert memory.load_todos() == [remaining]
     expected = json.dumps([remaining], ensure_ascii=False, indent=2)
     assert expected in model.invoke.call_args_list[1].args[0][0].content
 
-    # A fresh graph sees only the plans remaining after deletion.
-    restarted_model = make_model(AIMessage(content="Only the English plan remains."))
-    build_graph(restarted_model).invoke({"messages": [HumanMessage("List my plans.")]})
+    # A fresh graph sees only the todos remaining after deletion.
+    restarted_model = make_model(AIMessage(content="Only the English todo remains."))
+    build_graph(restarted_model).invoke({"messages": [HumanMessage("List my todos.")]})
     assert expected in restarted_model.invoke.call_args.args[0][0].content
 
 
-def test_delete_tool_reports_missing_plan(capsys):
-    result = delete_study_plan.invoke({"project": "Python", "date": "2026-10-29"})
+def test_delete_tool_reports_missing_todo(capsys):
+    result = delete_todo.invoke({"project": "Python", "date": "2026-10-29"})
     assert "not found" in result
     assert "Deleted" not in capsys.readouterr().out
-    assert memory.load_plans() == []
+    assert memory.load_todos() == []
 
 
 def test_console_explains_database_error(monkeypatch, capsys):
     graph = make_idle_graph()
     graph.invoke.side_effect = sqlite3.OperationalError("Simulated unwritable database")
-    inputs = iter(["Query plans", "exit"])
+    inputs = iter(["Query todos", "exit"])
     monkeypatch.setattr("builtins.input", lambda _: next(inputs))
     console.chat(graph)
     assert "Database operation failed" in capsys.readouterr().out
@@ -472,27 +472,25 @@ def test_console_explains_database_error(monkeypatch, capsys):
 
 @pytest.mark.parametrize("missing_date", [True, False])
 def test_delete_errors_do_not_report_success(monkeypatch, capsys, missing_date):
-    saved = memory.save_plan("Python", 60, "2026-10-29")
+    saved = memory.save_todo("Python", 60, "2026-10-29")
     args = {"project": "Python"}
     if not missing_date:
         args["date"] = "2026-10-29"
         monkeypatch.setattr(
             memory,
-            "delete_plan",
+            "delete_todo",
             Mock(side_effect=OSError("Simulated delete write failure")),
         )
     model = make_model(
         AIMessage(
             content="",
-            tool_calls=[
-                {"name": "delete_study_plan", "args": args, "id": "delete-error"}
-            ],
+            tool_calls=[{"name": "delete_todo", "args": args, "id": "delete-error"}],
         ),
         AIMessage(content="Deletion did not succeed."),
     )
     result = build_graph(model).invoke(
-        {"messages": [HumanMessage("Delete this plan.")]}
+        {"messages": [HumanMessage("Delete this todo.")]}
     )
     assert result["messages"][2].status == "error"
     assert "Deleted" not in capsys.readouterr().out
-    assert memory.load_plans() == [saved]
+    assert memory.load_todos() == [saved]

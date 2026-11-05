@@ -8,9 +8,9 @@ Code comments, tool descriptions, prompts, and terminal messages are in English.
 
 See [Version Learning Guide](docs/VERSIONS.md) for each version's learning goals, architecture diagram, changes, reading order, and exercises. Version 5 adds summary compression to version 4's persistent conversations. Todo CRUD stays unchanged; old JSON data is never imported.
 
-## Todo fields and existing data
+## Todo fields and storage
 
-This is a theme adjustment within version 5, before version 6. Existing study-plan records are displayed as todos without rewriting or duplicating them. Stored chats, message IDs, thread IDs, and existing summaries are not migrated or cleared. Normal version 5 summary compression still applies to later conversation turns.
+This is a Todo naming and storage adjustment within version 5, before version 6. Todo records and conversations start in new database files; previous data is not imported or migrated.
 
 | Stored field | Todo meaning |
 |---|---|
@@ -20,7 +20,7 @@ This is a theme adjustment within version 5, before version 6. Existing study-pl
 
 All three fields are required when saving. This version has no completion/status field: saying a todo is done does not delete it or mark it complete. Updating the same name and date changes only duration; changing a name or date adds another record, rather than replacing the old one.
 
-The database file/table (`data/study_plans.sqlite`, `study_plans`), Python record/functions (`StudyPlan`, `load_plans`, `save_plan`, `delete_plan`), and tool names (`save_study_plan`, `delete_study_plan`) retain their legacy names so saved data and unfinished tool calls remain compatible. Current instructions and tool output use todo wording. No schema migration or automatic data rewrite runs at startup. The package and `simple-react-agent` launch command also keep their names.
+Todo records use `data/todos.sqlite`, the `todos` table, and the `TodoItem` type. Storage functions are `load_todos()`, `save_todo()`, and `delete_todo()` in `memory.py`; the model-facing tools are `save_todo` and `delete_todo` in `tools.py`. Conversations and summaries use `data/todo_checkpoints.sqlite`. Old tool aliases are removed. The package and `simple-react-agent` launch command keep their generic names.
 
 ## Run
 
@@ -58,7 +58,7 @@ With the project's installed virtual environment activated, you can also run:
 python -m agent_apps.simple_react_agent
 ```
 
-The module entry point opens the same menu. Names serve as internal `thread_id` values and are case-sensitive. Surrounding whitespace is removed; empty or existing names are rejected when creating a conversation. Older saved conversations, including `default`, remain selectable. There is no automatic default selection or command-line conversation option.
+The module entry point opens the same menu. Names serve as internal `thread_id` values and are case-sensitive. Surrounding whitespace is removed; empty or existing names are rejected when creating a conversation. Conversations saved in the new todo checkpoint database remain selectable after restart. There is no automatic default selection or command-line conversation option.
 
 Type `exit` or `quit`, or press Ctrl+C, to stop. Exit commands are case-insensitive. Configuration is read only from the agent-local `.env`, independently of the working directory. The outer repository `.env` and same-named shell variables are not used. Values are read without modifying `os.environ` or expanding `${...}` references. The private `.env` is ignored by Git; `.env.example` is the shareable template.
 
@@ -118,7 +118,7 @@ Models do not always follow instructions perfectly. Check the printed tool messa
 
 ## Persistent conversations (introduced in version 4)
 
-Start `uv run simple-react-agent`, choose `0`, name the conversation `home-todos`, say "I want to organize my errands," then exit. Start again, select `home-todos` by its displayed number, and ask "What did I want to organize?" The graph restores messages from `data/checkpoints.sqlite` using that conversation's `thread_id`.
+Start `uv run simple-react-agent`, choose `0`, name the conversation `home-todos`, say "I want to organize my errands," then exit. Start again, select `home-todos` by its displayed number, and ask "What did I want to organize?" The graph restores messages from `data/todo_checkpoints.sqlite` using that conversation's `thread_id`.
 
 Create another conversation named `work-todos` for separate history. Startup always asks you to choose; you do not need to remember or pass an ID. Displayed numbers are temporary menu positions, while the saved conversation names remain stable.
 
@@ -149,7 +149,7 @@ The base model generates the summary without tool binding. Its Markdown instruct
 
 The response model receives system instructions, the latest database todo list, the historical summary, and recent original messages. The summary is historical data, not new instructions; current saved todos remain authoritative. No summary operation saves or deletes todos.
 
-Compression updates the current graph state using `RemoveMessage`. Older checkpoint snapshots remain in SQLite, so the database file does not automatically shrink. Restarting the same conversation restores its summary and recent messages. Existing version 4 checkpoints work with an empty initial summary and need no migration. Long individual inputs, large retained turns, or very large old histories can still exceed a model's capacity; this version does not implement chunked summarization or a hard context limit.
+Compression updates the current graph state using `RemoveMessage`. Older checkpoint snapshots remain in SQLite, so the database file does not automatically shrink. Restarting the same conversation restores its summary and recent messages. Long individual inputs, large retained turns, or very large old histories can still exceed a model's capacity; this version does not implement chunked summarization or a hard context limit.
 
 ## SQLite todos (introduced in version 3)
 
@@ -160,9 +160,9 @@ Assistant: ...
 You: exit
 ```
 
-Restart and ask "What todos do I have?" Before every model call, the program queries all todos from `data/study_plans.sqlite` and adds them to the system prompt.
+Restart and ask "What todos do I have?" Before every model call, the program queries all todos from `data/todos.sqlite` and adds them to the system prompt.
 
-The `study_plans` table has only `project`, `minutes`, and `date` business fields. Todo name (`project`) and scheduled date form a composite primary key. Queries still return the same dictionary-list structure for prompt formatting:
+The `todos` table has only `project`, `minutes`, and `date` business fields. Todo name (`project`) and scheduled date form a composite primary key. Queries still return the same dictionary-list structure for prompt formatting:
 
 ```json
 [
@@ -179,7 +179,7 @@ The first query or write creates the database. Its path is anchored to `memory.p
 
 ## Storage initialization
 
-The todo database creates an empty table on first use. Old JSON is neither read nor imported. Existing SQLite records, checkpoints, and saved summaries are reused when changing to the todo theme. The checkpoint database starts recording conversations from version 4; it cannot recover version 3's former in-memory chat history.
+The application creates the new databases on first use. The first launch has an empty todo list and conversation menu. Old `data/study_plans.sqlite`, `data/checkpoints.sqlite`, and JSON files are ignored and are not migrated or automatically deleted. You can delete those old files yourself. Later restarts reuse the new todo records, conversations, and summaries.
 
 ## Delete a todo
 
@@ -207,7 +207,7 @@ simple_react_agent/
 ├── prompts.py                    # Load templates and insert todo data
 └── prompt_templates/            # Markdown only; no __init__.py
     ├── system_prompt.md          # Role, tools, saving, and deletion rules
-    ├── todo_list_prompt.md       # Todo-list template with the legacy {plans} placeholder
+    ├── todo_list_prompt.md       # Todo-list template with the {todos} placeholder
     └── summary_prompt.md         # Rolling-summary instructions, no tools
 ```
 
@@ -221,7 +221,7 @@ Filenames use lowercase and Python constants use uppercase; their casing does no
 
 ## Two kinds of memory
 
-`data/checkpoints.sqlite` stores graph state by `thread_id`, including conversation history and execution progress. `data/study_plans.sqlite` stores the three-field todos. Different threads have separate conversations but share the same todo list; a thread ID is not a user account.
+`data/todo_checkpoints.sqlite` stores graph state by `thread_id`, including conversation history and execution progress. `data/todos.sqlite` stores the three-field todos. Different threads have separate conversations but share the same todo list; a thread ID is not a user account.
 
 Both files survive restart and are excluded from Git. Version 5 keeps recent original messages and a lossy historical summary in the latest graph state. Choose `0` at startup for a fresh conversation. Run one console at a time for a given conversation.
 
@@ -243,4 +243,4 @@ From the repository root:
 uv run pytest -q src/agent_apps/simple_react_agent/tests
 ```
 
-Tests use simulated models, temporary configuration files, and temporary databases without real API keys or network. They cover configuration isolation, threshold boundaries, rolling summaries, tool-pair preservation, failed summary recovery, cross-process restoration, version 4 compatibility, todo CRUD, and Unicode input and storage.
+Tests use simulated models, temporary configuration files, and temporary databases without real API keys or network. They cover configuration isolation, threshold boundaries, rolling summaries, tool-pair preservation, failed summary recovery, cross-process restoration, pending todo tool recovery, todo CRUD, and Unicode input and storage.

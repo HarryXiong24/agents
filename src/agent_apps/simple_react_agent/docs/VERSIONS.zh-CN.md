@@ -6,7 +6,7 @@
 
 这份文档专门记录每个版本学什么、增加什么、怎样验证。后续增加功能时，继续在这里追加对应版本。
 
-当前运行代码是第五版，在 SQLite 会话与原有记录基础上增加滚动摘要，目前助手通过原学习计划存储管理待办事项。第一至第四版记录用于回顾演进过程，并不是互相独立的运行目录；阅读当前上下文管理代码时请对照第五版。
+当前运行代码是第五版，在 SQLite 会话与原有记录基础上增加滚动摘要，目前助手的工具、函数、类型和新 SQLite 存储均使用 Todo 命名。下方学习计划相关标识属于历史版本；当前名称见第五版。第一至第四版记录用于回顾演进过程，并不是互相独立的运行目录；阅读当前上下文管理代码时请对照第五版。
 
 图中既包含程序组件，也包含数据流。第一至第四版有“模型节点”和“工具节点”，第五版新增“摘要节点”；存储辅助函数和终端循环仍不是图节点。
 
@@ -502,9 +502,9 @@ uv run pytest -q src/agent_apps/simple_react_agent/tests
 
 区分已保存的检查点、当前图状态，以及真正发给模型的上下文。将较早的完整对话归纳为滚动摘要，保留近期原文。会话菜单、SQLite Saver、四个工具和三字段存储记录保持不变。此前讨论的执行预算与次数限制不包含在本版。
 
-### 第六版之前的 Todo 主题调整
+### 第六版之前的 Todo 命名与存储调整
 
-当前应用改为 Todo List Assistant，面向家务、工作和学习等待办。这是第五版内部的提示词与文案调整，第六版执行预算尚未实现。
+当前应用改为 Todo List Assistant，面向家务、工作和学习等待办。这是第五版内部的提示词、工具／函数／类型命名与新数据库文件调整，第六版执行预算尚未实现。
 
 | 既有字段 | 当前含义 |
 |---|---|
@@ -514,9 +514,20 @@ uv run pytest -q src/agent_apps/simple_react_agent/tests
 
 新增、查看与筛选、更新预计耗时、删除和耗时计算沿用现有代码路径。不增加完成状态，因此表达“做完了”不授权删除，也不会保存完成标记。同名同日期只更新耗时；不同名称或日期会新增记录，不会改名或重排原记录。
 
-`data/study_plans.sqlite`、`study_plans` 表、全部字段、`StudyPlan`、存储函数名，以及 `save_study_plan`/`delete_study_plan` 工具名均保留。已有记录直接作为待办展示，不迁移、不复制；这次修改不改写已保存的消息、ID、摘要或检查点。后续用户轮次仍执行原有摘要压缩。前面各版本继续保留历史学习说明。
+各层统一使用以下名称：
 
-当前列表模板改为 `prompt_templates/todo_list_prompt.md`，由 `TODO_LIST_PROMPT` 加载，保留 `{plans}` 占位符来展示既有字典。系统指令、工具说明、新返回消息和终端使用待办文案；摘要规则保留旧学习对话和历史操作的原意。包名与启动命令保持不变。
+| 层次 | 当前名称 |
+|---|---|
+| 数据类型 | `TodoItem` |
+| `memory.py` 存储函数 | `load_todos()`、`save_todo()`、`delete_todo()` |
+| `tools.py` 提供给模型的工具 | `save_todo`、`delete_todo` |
+| 待办数据库与表 | `data/todos.sqlite`、`todos` |
+| 会话与摘要 | `data/todo_checkpoints.sqlite` |
+| 列表模板与占位符 | `prompt_templates/todo_list_prompt.md`、`{todos}` |
+
+不保留旧工具别名，不做数据迁移。新文件中的待办和会话从空数据开始，之后重启继续使用。旧 `data/study_plans.sqlite`、`data/checkpoints.sqlite` 和 JSON 文件均忽略，可自行删除。LangGraph 内部检查点表名仍由 `SqliteSaver` 管理。
+
+`TODO_LIST_PROMPT` 加载待办模板。系统指令、工具说明、返回消息、终端和摘要规则统一使用待办文案。通用包名与启动命令保持不变。前面第一至第四版保留原标识，作为历史学习记录。
 
 ### 组件结构图
 
@@ -532,8 +543,8 @@ flowchart TD
     M -->|提出工具调用| T[工具节点]
     T -->|本轮工具结果| M
     M -->|最终回答| E[END]
-    CP[SQLite Checkpointer] <-->|摘要与近期消息| S
-    P[最新待办数据库 - 原 study_plans] -->|每次回答模型调用前读取| M
+    CP[SQLite Checkpointer - todo_checkpoints.sqlite] <-->|摘要与近期消息| S
+    P[最新待办数据库 - todos.sqlite] -->|每次回答模型调用前读取| M
     SP[新增：summary_prompt.md 与未绑定工具的模型] --> S
     classDef changed fill:#fff3df,stroke:#c76a00,stroke-width:2px;
     class S,CFG,U,SP changed;
@@ -564,7 +575,7 @@ SUMMARY_TRIGGER_TOKENS=500
 
 ### 状态与滚动更新
 
-`AgentState` 继承 `MessagesState` 并增加可选的 `summary`。第四版旧检查点没有该字段时按空字符串处理，不需要迁移数据库。
+`AgentState` 继承 `MessagesState` 并增加可选的 `summary`。状态中缺少此字段时按空字符串处理。Todo 应用不加载以前的数据库文件。
 
 例如第 5 轮用户输入到来时：
 
@@ -608,7 +619,7 @@ Context: Earlier conversation summarized; recent turns kept.
 | `console.py` | 压缩提示和摘要错误展示，不输出摘要全文 |
 | `tests/test_summarization.py` | 临界值、持久化滚动状态与失败恢复 |
 | `tests/test_config.py` | 与外层文件、进程变量和启动目录的隔离 |
-| `tests/test_todo_compatibility.py` | 待办文案和增删改查、旧记录保留，以及保留历史消息和摘要的旧工具调用恢复 |
+| `tests/test_todos.py` | 新数据库忽略旧文件、待办提示词与工具契约、增删改查，以及重启后继续未完成的待办工具调用 |
 
 按照表格顺序阅读，再分别追踪普通轮次、触发摘要的轮次和调用工具的轮次。只有需要压缩时才增加摘要模型请求，因此会增加一定费用和等待时间。
 
@@ -622,7 +633,7 @@ Context: Earlier conversation summarized; recent turns kept.
 4. 新建另一会话，确认不共享摘要，但仍共享已保存的待办。
 5. 将 `SUMMARY_TRIGGER_TOKENS` 改为 6000，重启后比较触发频率。
 
-离线测试覆盖本地配置与父目录文件、进程变量的隔离，精确阈值边界、没有可归纳轮次时不压缩、工具交换 JSON 化、滚动摘要更新、非法摘要保留原文、摘要未缩短时跳过压缩、短历史遇到长输入后仍可回答和重开会话、跨进程恢复、第四版检查点兼容、会话隔离，以及原有待办增删改查。
+离线测试覆盖本地配置与父目录文件、进程变量的隔离，精确阈值边界、没有可归纳轮次时不压缩、工具交换 JSON 化、滚动摘要更新、非法摘要保留原文、摘要未缩短时跳过压缩、短历史遇到长输入后仍可回答和重开会话、跨进程恢复、初始状态没有摘要字段、会话隔离，以及原有待办增删改查。
 
 本版压缩的是最新状态和模型输入。旧检查点仍保留，SQLite 文件不会自动缩小。单条特别长的输入、近期保留轮次过长、或原有历史特别大时，仍可能超出模型容量；分块摘要和严格上下文预算不属于本版。
 

@@ -21,9 +21,9 @@ from agent_apps.simple_react_agent.graph import build_graph
 
 @pytest.fixture(autouse=True)
 def isolate_storage(tmp_path, monkeypatch):
-    monkeypatch.setattr(memory, "DATABASE_FILE", tmp_path / "study_plans.sqlite")
+    monkeypatch.setattr(memory, "DATABASE_FILE", tmp_path / "todos.sqlite")
     monkeypatch.setattr(
-        checkpoints, "CHECKPOINTS_FILE", tmp_path / "data" / "checkpoints.sqlite"
+        checkpoints, "CHECKPOINTS_FILE", tmp_path / "data" / "todo_checkpoints.sqlite"
     )
     monkeypatch.setattr(config, "ENV_FILE", tmp_path / ".env")
 
@@ -47,7 +47,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from agent_apps.simple_react_agent import memory
 from agent_apps.simple_react_agent.graph import build_graph
 
-memory.DATABASE_FILE = Path(sys.argv[1]) / "plans.sqlite"
+memory.DATABASE_FILE = Path(sys.argv[1]) / "todos.sqlite"
 model = Mock(spec=BaseChatModel)
 model.bind_tools.return_value = model
 if sys.argv[2] == "write":
@@ -63,7 +63,7 @@ else:
     model.invoke.return_value = AIMessage(content="You mentioned Python.")
     text = "What subject did I mention?"
 
-with SqliteSaver.from_conn_string(str(Path(sys.argv[1]) / "checkpoints.sqlite")) as saver:
+with SqliteSaver.from_conn_string(str(Path(sys.argv[1]) / "todo_checkpoints.sqlite")) as saver:
     graph = build_graph(model, checkpointer=saver)
     result = graph.invoke(
         {"messages": [HumanMessage(text)]},
@@ -94,38 +94,40 @@ with SqliteSaver.from_conn_string(str(Path(sys.argv[1]) / "checkpoints.sqlite"))
     assert separate[0]["content"] == "What subject did I mention?"
 
 
-def test_plan_records_are_shared_but_conversation_history_is_separate(tmp_path):
-    plan = memory.save_plan("Python", 60, "2026-10-29")
-    with SqliteSaver.from_conn_string(str(tmp_path / "checkpoints.sqlite")) as saver:
-        model = make_model(AIMessage(content="Hello."), AIMessage(content="Your plan."))
+def test_todo_records_are_shared_but_conversation_history_is_separate(tmp_path):
+    todo = memory.save_todo("Python", 60, "2026-10-29")
+    with SqliteSaver.from_conn_string(
+        str(tmp_path / "todo_checkpoints.sqlite")
+    ) as saver:
+        model = make_model(AIMessage(content="Hello."), AIMessage(content="Your todo."))
         graph = build_graph(model, checkpointer=saver)
         graph.invoke(
             {"messages": [HumanMessage("Private conversation A")]},
             config={"configurable": {"thread_id": "a"}},
         )
         graph.invoke(
-            {"messages": [HumanMessage("List my plans")]},
+            {"messages": [HumanMessage("List my todos")]},
             config={"configurable": {"thread_id": "b"}},
         )
         request = model.invoke.call_args.args[0]
-        assert json.dumps([plan], ensure_ascii=False, indent=2) in request[0].content
-        assert [m.content for m in request[1:]] == ["List my plans"]
+        assert json.dumps([todo], ensure_ascii=False, indent=2) in request[0].content
+        assert [m.content for m in request[1:]] == ["List my todos"]
 
 
 def test_restart_after_model_failure_does_not_repeat_completed_save(
     tmp_path, monkeypatch
 ):
-    database = str(tmp_path / "checkpoints.sqlite")
-    config: RunnableConfig = {"configurable": {"thread_id": "save-plan"}}
-    original_save = memory.save_plan
+    database = str(tmp_path / "todo_checkpoints.sqlite")
+    config: RunnableConfig = {"configurable": {"thread_id": "save-todo"}}
+    original_save = memory.save_todo
     save = Mock(wraps=original_save)
-    monkeypatch.setattr(memory, "save_plan", save)
+    monkeypatch.setattr(memory, "save_todo", save)
     first = make_model(
         AIMessage(
             content="",
             tool_calls=[
                 {
-                    "name": "save_study_plan",
+                    "name": "save_todo",
                     "args": {"project": "Python", "minutes": 60, "date": "2026-10-29"},
                     "id": "save",
                 }
@@ -139,11 +141,11 @@ def test_restart_after_model_failure_does_not_repeat_completed_save(
     with SqliteSaver.from_conn_string(database) as saver:
         graph = build_graph(first, checkpointer=saver)
         with pytest.raises(APIConnectionError):
-            graph.invoke({"messages": [HumanMessage("Save my plan")]}, config=config)
+            graph.invoke({"messages": [HumanMessage("Save my todo")]}, config=config)
         assert graph.get_state(config).next == ("model",)
     assert save.call_count == 1
 
-    resumed = make_model(AIMessage(content="Your plan was saved."))
+    resumed = make_model(AIMessage(content="Your todo was saved."))
     with SqliteSaver.from_conn_string(database) as saver:
         graph = build_graph(resumed, checkpointer=saver)
         result = graph.invoke(None, config=config)
@@ -196,7 +198,9 @@ def test_checkpoint_storage_error_is_readable(monkeypatch):
 
 
 def test_menu_lists_each_saved_thread_once_and_keeps_old_default(tmp_path):
-    with SqliteSaver.from_conn_string(str(tmp_path / "checkpoints.sqlite")) as saver:
+    with SqliteSaver.from_conn_string(
+        str(tmp_path / "todo_checkpoints.sqlite")
+    ) as saver:
         assert checkpoints.list_threads(saver) == []
         model = make_model(*(AIMessage(content="Hello") for _ in range(3)))
         graph = build_graph(model, checkpointer=saver)
@@ -222,7 +226,9 @@ def test_menu_validates_choices_and_new_names_without_storage(monkeypatch, capsy
 def test_new_conversation_name_is_trimmed_and_saved_only_after_first_message(
     tmp_path, monkeypatch
 ):
-    with SqliteSaver.from_conn_string(str(tmp_path / "checkpoints.sqlite")) as saver:
+    with SqliteSaver.from_conn_string(
+        str(tmp_path / "todo_checkpoints.sqlite")
+    ) as saver:
         inputs = iter(["0", "  New conversation  "])
         monkeypatch.setattr("builtins.input", lambda _: next(inputs))
         name = console.select_thread(checkpoints.list_threads(saver))
