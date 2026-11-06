@@ -11,6 +11,7 @@ from langgraph.prebuilt import ToolNode
 
 from ..config import agent as agent_settings
 from . import memory
+from .middleware import wrap_tool_call
 from .prompts import TOOL_ERROR_MESSAGE, build_system_prompt
 from .state import AgentState, ToolCallRecord
 from .summarization import summarize_conversation
@@ -25,7 +26,12 @@ def build_graph(
     agent_config = agent_settings.AGENT_CONFIG
     # Expose tool schemas to the model. Binding does not execute any tools.
     model_with_tools = model.bind_tools(TOOLS)
-    tool_node = ToolNode(TOOLS, handle_tool_errors=TOOL_ERROR_MESSAGE)
+    tool_node = ToolNode(
+        TOOLS,
+        handle_tool_errors=TOOL_ERROR_MESSAGE,
+        # Observe each individual call; call_tools still produces State updates.
+        wrap_tool_call=wrap_tool_call,
+    )
 
     # A node returns a partial state update.
     def call_model(state: AgentState):

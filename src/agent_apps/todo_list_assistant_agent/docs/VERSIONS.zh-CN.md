@@ -11,17 +11,21 @@
 | V3 | JSON 替换为 SQLite，独立构图与提示词模板目录 | SQL 增删改查、事务、连接管理、模块分层 |
 | V4 | SQLite 检查点、会话列表选择、失败后继续执行 | `MessagesState`、Checkpointer、`thread_id`、终端与存储分层 |
 | V5 | 滚动摘要、可配置 token 阈值、本地配置隔离、Todo 命名与存储 | 上下文压缩、完整轮次、`RemoveMessage` |
-| V6（当前） | 自定义工具历史 reducer、执行记录、历史查询、`agent/` 包与配置统一入口 | State 增量更新、runtime 注入、持久化、自定义状态向模型开放 |
+| V6 | 自定义工具历史 reducer、执行记录、历史查询、`agent/` 包与配置统一入口 | State 增量更新、runtime 注入、持久化、自定义状态向模型开放 |
+| V7（当前） | 单次工具调用观察中间件，输出名称、调用 ID、状态与耗时 | `wrap_tool_call`、请求与执行器、`try/finally`、观察与 State 更新的区别 |
 
 当前代码、提示词、工具说明和终端文案默认使用英文，退出命令为 `exit` 或 `quit`。本文保留中文学习说明，以下旧版本内容用于回顾功能演进。
 
 这份文档专门记录每个版本学什么、增加什么、怎样验证。后续增加功能时，继续在这里追加对应版本。
 
-当前运行代码是第六版，在第五版滚动摘要的基础上增加自定义 State 更新与有数量上限的工具执行历史。目前工具、函数、类型和 SQLite 存储使用 Todo 命名，这些名称在第五版引入。第一至第五版记录用于回顾演进过程，并不是互相独立的运行目录；摘要压缩对照第五版，State 维护与工具历史 reducer 对照第六版。
+当前运行代码是第七版，在第六版自定义 State 与工具历史查询的基础上增加工具调用观察中间件。
+第五版讲摘要压缩，第六版讲 State 维护，第七版讲工具调用包装。
+当前工具、函数、类型和 SQLite 存储使用 Todo 命名。第一至第六版记录用于回顾演进，
+并不是互相独立的运行目录。
 
-当前 Agent 执行与持久化模块位于 `agent/`，启动、终端和共享配置保留在应用根目录。旧章节保留历史路径；对照当前源码时，以第六版目录布局为准。
+当前 Agent 执行与持久化模块位于 `agent/`，启动、终端和共享配置保留在应用根目录。旧章节保留历史路径；对照当前源码时，以第六版目录布局加第七版的 `agent/middleware.py` 为准。
 
-图中既包含程序组件，也包含数据流。第一至第四版有“模型节点”和“工具节点”，第五版新增“摘要节点”；第六版沿用这三个节点，在工具步骤内增加自定义状态处理。存储辅助函数和终端循环仍不是图节点。
+图中既包含程序组件，也包含数据流。第一至第四版有“模型节点”和“工具节点”，第五版新增“摘要节点”；第六版沿用这三个节点，在工具步骤内增加自定义状态处理。第七版在 `ToolNode` 内增加包装函数，不增加节点。存储辅助函数和终端循环仍不是图节点。
 
 ## 第一版：终端对话与最小 ReAct
 
@@ -915,6 +919,124 @@ uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests/test_tool_histor
 模型是否选择工具仍由提示词与工具描述引导。已有文档中的限制继续适用：
 保留旧检查点、工具副作用与检查点使用独立事务，以及调小工具历史上限后，
 新上限在下一次工具节点更新时生效。
+
+## 第七版：工具调用观察中间件
+
+### 学习目标与范围
+
+在继续手写图的前提下，学习如何包装每一次工具调用。
+通过 `ToolNode.wrap_tool_call` 接入 `wrap_tool_call(request, execute)`，
+不引入 `create_agent()` 或 LangChain 的 `AgentMiddleware` 装饰器。
+
+执行前输出工具名与调用 ID，执行后输出状态与耗时秒数。包装函数只调用一次执行器，
+原样返回结果，并让异常继续传播。已有节点、五个工具、State schema、共享配置、
+待办存储与检查点路径保持不变。模型调用观察、重试、审批、预算、持久化耗时字段与
+多层包装组合不属于本版范围。
+
+### 组件结构图
+
+橙色部分是新增内容。注册的图节点只有摘要、模型和工具三个；
+包装函数、执行器、记录生成与 reducer 方框表示内部处理。
+
+```mermaid
+flowchart TD
+    I[新用户消息] --> S[摘要节点]
+    S --> M[模型节点]
+    M -->|请求工具| T[tools 节点: call_tools]
+    M -->|最终回答| E[END]
+    T --> N[ToolNode 分发每次调用]
+    N --> B[新增: wrap_tool_call 输出开始]
+    B --> X[execute request: 校验和执行工具]
+    X --> F[新增: finally 输出状态和耗时]
+    F --> U[call_tools 返回消息与新增记录]
+    U --> M
+    U --> R[原有历史 reducer]
+    R --> CP[原有 SQLite 检查点]
+    B --> C[仅终端输出]
+    F --> C
+    classDef changed fill:#fff3df,stroke:#c76a00,stroke-width:2px;
+    class B,F changed;
+```
+
+图中结果路径表示正常返回或已处理错误。执行器抛出异常时，`finally` 仍输出结束信息，
+异常继续交给 `ToolNode` 的错误处理。同批工具分别经过包装函数，可能并发执行；
+工具节点完成后，模型再读取本批结果。
+
+### 新增与调整组件
+
+| 组件 | 职责 |
+|---|---|
+| `agent/middleware.py` | 使用局部计时与状态变量，观察单次工具调用 |
+| `agent/graph.py` | 在原有 `ToolNode` 上注册 `wrap_tool_call=wrap_tool_call` |
+| `tests/test_middleware.py` | 验证原样传递、仅执行一次、错误、耗时及图／历史集成 |
+
+### 请求、执行器与返回值
+
+两个参数都由 `ToolNode` 提供，模型不会构造或调用这个包装函数：
+
+- `request`：`ToolCallRequest`，包含 `tool_call`、工具对象、State 与 runtime。
+- `execute`：框架提供的后续执行函数；`execute(request)` 按原有错误处理策略，
+  进行真正的参数校验与工具执行。
+
+包装函数原样返回 `execute` 提供的 `ToolMessage` 或 `Command` 对象。
+必须返回结果，图才能继续处理它。包装函数不在 `TOOLS` 中，不需要系统提示词引导调用。
+
+`perf_counter()` 计量耗时，`try/finally` 保证 `execute` 抛出异常时也输出结束日志。
+不增加宽泛异常捕获、不重试，也不吞掉异常。正常返回前先设置状态；向外传播的异常
+让状态保持为 `exception`。局部变量使各并发调用互不干扰，通过调用 ID 对应交错的开始和结束行。
+
+| 输出状态 | 含义 |
+|---|---|
+| `success` | 返回的 `ToolMessage.status` 是 `success` |
+| `error` | 返回的 `ToolMessage.status` 是 `error`，例如已处理的参数校验失败 |
+| `exception` | 执行未返回结果就抛出异常，异常继续传播 |
+| `command` | 执行返回 `Command`，包装函数原样传递 |
+
+这些标签不根据结果文本推断业务是否成功。计算器除零时返回错误说明字符串，
+因此对应 `ToolMessage` 的状态仍可能是 `success`。已有工具返回消息；支持透传 Command
+是为了遵循 ToolNode 的包装契约，不代表新增了工具能力。
+
+### 观察与 State 更新
+
+观察日志只输出到终端，不成为模型消息、`tool_history` 字段或 SQLite 记录。
+`call_tools()` 仍在本批工具执行后生成四字段历史记录，再由 reducer 合并。
+
+`get_tool_history` 与其他工具一样会产生观察日志，但仍不计入持久化工具历史。
+包装函数不修改 `request.state`、不改参数，也不额外生成执行记录，已有检查点继续可用。
+
+### 阅读顺序与动手验证
+
+1. 阅读 `agent/middleware.py`，追踪 `request`、`execute` 与返回结果。
+2. 依次看 `try`、`return`、`finally`，解释为什么写在 `try` 中的 `return` 返回给调用方前，
+   仍会执行日志输出。
+3. 在 `agent/graph.py` 找到 `wrap_tool_call=wrap_tool_call`，区分单次工具观察与原有整批处理函数 `call_tools()`。
+4. 做一次计算，再查询工具历史：两次调用都有观察日志，只有计算新增持久化执行记录。
+5. 尝试除零，对照结果文本与协议状态。
+6. 阅读离线错误测试，观察已处理错误与向外传播异常的区别。
+
+下面是示意输出，调用 ID 和耗时取决于实际运行：
+
+```text
+Tool call started: name=calculate, id=calculation-1
+Tool: Calculating 2.0 add 1.0.
+Tool call finished: name=calculate, id=calculation-1, status=success, elapsed=0.001s
+```
+
+### 验证方式
+
+在项目根目录运行：
+
+```bash
+uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests/test_middleware.py
+uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests
+```
+
+测试使用模拟模型和临时 SQLite 文件，覆盖 success／error／Command 返回对象保持不变、
+执行器仅调用一次、可确定的耗时输出、异常传播、同批每次调用日志、历史查询、
+State 字段不变与检查点持久化，无需私有数据或真实模型请求。
+
+2026-11-06 离线验证结果：中间件测试 **5 项通过**，完整测试 **120 项通过**，
+Ruff lint／格式检查通过，Pyright **0 个错误、0 个警告**。未调用真实模型 API。
 
 ## 后续版本怎样继续记录
 

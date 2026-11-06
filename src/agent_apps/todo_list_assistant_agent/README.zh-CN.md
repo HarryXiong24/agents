@@ -110,9 +110,10 @@ Assistant: That is 315 minutes, or 5.25 hours.
 1. 读 `agent/tools.py`：普通函数怎样通过 `@tool` 变成工具；参数和说明怎样帮助模型选择工具。
 2. 读 `config/` 和 `agent/model.py`：前者负责配置读取、解析和校验，后者负责模型创建。
 3. 读 `agent/memory.py` 和 `agent/prompts.py`：待办事项怎样写入数据库、查询，再进入系统提示词。
-4. 读 `agent/state.py` 和 `agent/graph.py`：`call_tools()` 怎样返回新增记录，reducer 怎样合并；再看 `agent/summarization.py` 中的摘要节点。
-5. 读 `agent/checkpoints.py` 和 `console.py`：存储层怎样返回会话名称列表，菜单怎样选择，以及 `chat()` 怎样将新消息和对应的 `thread_id` 交给图。
-6. 最后看 `main()` 和 `__main__.py`：启动过程以及 `SqliteSaver` 的连接生命周期。
+4. 读 `agent/middleware.py`：理解 `ToolNode` 怎样在每次工具调用周围传入请求与执行器。
+5. 读 `agent/state.py` 和 `agent/graph.py`：`call_tools()` 怎样返回新增记录，reducer 怎样合并；再看 `agent/summarization.py` 中的摘要节点。
+6. 读 `agent/checkpoints.py` 和 `console.py`：存储层怎样返回会话名称列表，菜单怎样选择，以及 `chat()` 怎样将新消息和对应的 `thread_id` 交给图。
+7. 最后看 `main()` 和 `__main__.py`：启动过程以及 `SqliteSaver` 的连接生命周期。
 
 核心流程只有一条循环：
 
@@ -191,11 +192,39 @@ Context: Earlier conversation summarized; recent turns kept.
 图为三个节点、五个工具。工具历史使用已有检查点数据库，没有独立的表；
 保留条数由 `AgentConfig.tool_history_limit` 配置，默认十条；
 `call_tools()` 包装 `ToolNode` 来生成记录。图的 `recursion_limit` 默认是 `20`，
-没有独立的工具调用次数预算，也未使用中间件记录。
+没有独立的工具调用次数预算。工具历史由节点生成；下面的观察中间件负责向终端输出执行信息。
 
 调小 `tool_history_limit` 后，新上限在下一次工具节点更新合并时生效。
 恢复检查点本身不会执行 reducer，因此此前保存的记录可能暂时超过新上限，
 第一次查询工具历史时也可能返回这份旧列表。
+
+## 工具调用观察
+
+`agent/middleware.py` 定义同步包装函数 `wrap_tool_call(request, execute)`，
+通过 `wrap_tool_call=wrap_tool_call` 接入 `ToolNode`。每次工具请求都会自动经过它，
+包括历史查询。执行前输出工具名和调用 ID，执行后输出返回状态与耗时秒数。
+下面是示意输出，实际耗时会变化：
+
+```text
+Tool call started: name=calculate, id=calculation-1
+Tool: Calculating 2.0 add 1.0.
+Tool call finished: name=calculate, id=calculation-1, status=success, elapsed=0.001s
+```
+
+`request` 包含工具调用、State 与 runtime；`execute(request)` 继续执行框架提供的工具流程。
+包装函数只执行一次，并原样返回结果。它不注册为工具，也不需要提示词要求模型选择它。
+并发调用的输出可能交错，通过 ID 对应开始与结束行。
+`wrap_tool_call=wrap_tool_call` 左侧是 `ToolNode` 的构造参数名，右侧是从
+`agent/middleware.py` 导入的自定义函数。
+
+`success`／`error` 来自 `ToolMessage.status`，不另外判断业务是否成功。
+例如计算器返回除零错误说明时，协议状态仍可能是 `success`。
+向外抛出的异常记录为 `exception`，继续交给 `ToolNode` 原有的错误处理；
+返回的 `Command` 标记为 `command` 并原样传递。`finally` 保证抛出异常时也输出耗时。
+
+观察日志只是终端输出，不是模型消息或检查点字段。包装函数不更新 State、不重试工具，
+也不增加图节点。`call_tools()` 继续返回原有工具历史增量，并排除历史查询记录。
+图仍是三个节点、五个工具，当前终端流程使用同步调用。
 
 ## SQLite 待办事项存储
 
@@ -259,6 +288,7 @@ todo_list_assistant_agent/
 │   ├── graph.py                  # 摘要、模型、工具节点
 │   ├── state.py                  # 消息、摘要和工具历史 reducer
 │   ├── tools.py                  # 时间、计算、待办和历史查询
+│   ├── middleware.py             # 单次工具状态与耗时观察
 │   ├── model.py                  # 创建聊天模型
 │   ├── prompts.py                # 读取模板与动态组装提示词
 │   ├── summarization.py          # token 估算和摘要更新
@@ -328,4 +358,4 @@ token 阈值、完整轮次保留和 `RemoveMessage`。结构图、阅读顺序�
 uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests
 ```
 
-测试使用模拟模型、临时配置文件和临时数据库，不需要真实密钥或网络。覆盖配置隔离、触发阈值、滚动摘要、工具配对、摘要失败恢复、跨进程恢复、待办工具中断恢复、工具记录数量限制、只读历史查询、runtime 注入、摘要后的工具记录保留、待办增删改查，以及中文输入和存储。
+测试使用模拟模型、临时配置文件和临时数据库，不需要真实密钥或网络。覆盖配置隔离、触发阈值、滚动摘要、工具配对、摘要失败恢复、跨进程恢复、待办工具中断恢复、工具记录数量限制、只读历史查询、runtime 注入、摘要后的工具记录保留、待办增删改查、中文输入和存储，以及工具观察过程中结果、错误与 State 保持不变。

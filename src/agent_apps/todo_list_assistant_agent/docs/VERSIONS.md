@@ -11,17 +11,24 @@ English | [简体中文](VERSIONS.zh-CN.md)
 | V3 | Replace JSON with SQLite; separate graph construction and prompt templates | SQL CRUD, transactions, connections, and module boundaries |
 | V4 | SQLite checkpoints, saved conversation selection, and resume after failure | `MessagesState`, Checkpointer, `thread_id`, and console/storage separation |
 | V5 | Rolling summaries, configurable token threshold, local configuration, and Todo naming/storage | Context compression, complete turns, and `RemoveMessage` |
-| V6 (current) | Custom tool-history reducer, execution records, history queries, and an `agent/` package with a central configuration entry point | Incremental State updates, runtime injection, persistence, and model access to custom state |
+| V6 | Custom tool-history reducer, execution records, history queries, and an `agent/` package with a central configuration entry point | Incremental State updates, runtime injection, persistence, and model access to custom state |
+| V7 (current) | Per-tool observation middleware with name, call ID, status, and elapsed time | `wrap_tool_call`, request/executor flow, `try/finally`, and observation versus State updates |
 
 This document records what each version teaches, what it adds, and how to verify it. Append the same information when a future version adds another building block.
 
-The running code is **version 6**, adding custom State updates and bounded tool execution history to version 5's rolling summaries. The current assistant uses Todo names throughout its tools, functions, types, and SQLite storage. Those names were introduced in version 5. Versions 1 through 5 describe the learning history, not separate runnable directories. Read version 5 for summary compression and version 6 for State maintenance and tool-history reducers.
+The running code is **version 7**, adding per-tool observation middleware to
+version 6's custom State and history queries. Version 5 covers summary compression,
+version 6 covers State maintenance, and version 7 covers the tool-call wrapper.
+The current assistant uses Todo names throughout its tools, functions, types,
+and SQLite storage. Versions 1 through 6 describe the learning history rather
+than separate runnable directories.
 
 Code, prompts, tool descriptions, and terminal messages use English. The assistant replies in English by default, with another language available on explicit request. Exit with `exit` or `quit`.
 
-Current Agent execution and persistence modules live under `agent/`, with startup, console, and shared configuration at the application root. Earlier sections retain their historical paths; use the version 6 layout when navigating current source.
+Current Agent execution and persistence modules live under `agent/`, with startup, console, and shared configuration at the application root. Earlier sections retain their historical paths; use the version 6 layout plus version 7's `agent/middleware.py` when navigating current source.
 
-Diagrams show components and data flow. Versions 1-4 have **Model node** and **Tool node**; version 5 adds **Summary node**. Version 6 keeps those three nodes and adds custom state processing inside the tools step. Storage helpers and the console are ordinary Python functions.
+Diagrams show components and data flow. Versions 1-4 have **Model node** and **Tool node**; version 5 adds **Summary node**. Version 6 keeps those three nodes and adds custom state processing inside the tools step. Version 7 adds a wrapper inside `ToolNode` without adding nodes. Storage helpers
+and the console are ordinary Python functions.
 
 ## Version 1: console chat and minimal ReAct
 
@@ -955,6 +962,137 @@ was used for verification. Model-driven tool selection remains governed by promp
 and tool descriptions. Existing documented limits remain: older checkpoints are
 retained, tool side effects and checkpoints use separate transactions, and a
 reduced history limit takes effect at the next tool-node update.
+
+## Version 7: tool call observation middleware
+
+### Learning goal and scope
+
+Learn how to wrap each tool call while continuing to build the graph manually.
+This version adds `wrap_tool_call(request, execute)` through `ToolNode.wrap_tool_call`;
+it does not introduce `create_agent()` or LangChain's `AgentMiddleware` decorators.
+
+The wrapper prints the tool name and call ID before execution, and status plus
+elapsed seconds after execution. It calls the executor once, preserves its result,
+and lets exceptions propagate. The existing nodes, five tools, State schema,
+shared configuration, todo storage, and checkpoint paths remain unchanged.
+Model-call observation, retries, approvals, budgets, persistent timing fields,
+and multiple wrapper layers are outside this version's scope.
+
+### Component diagram
+
+Orange boxes are new. Only summary, model, and tools are registered graph nodes;
+the wrapper, executor, record builder, and reducer boxes describe internal work.
+
+```mermaid
+flowchart TD
+    I[New user message] --> S[Summary node]
+    S --> M[Model node]
+    M -->|Tool calls| T[tools node: call_tools]
+    M -->|Final answer| E[END]
+    T --> N[ToolNode dispatches each call]
+    N --> B[New: wrap_tool_call logs start]
+    B --> X[execute request: validation and tool execution]
+    X --> F[New: finally logs status and elapsed time]
+    F --> U[call_tools returns messages and new records]
+    U --> M
+    U --> R[Existing history reducer]
+    R --> CP[Existing SQLite checkpoints]
+    B --> C[Terminal output only]
+    F --> C
+    classDef changed fill:#fff3df,stroke:#c76a00,stroke-width:2px;
+    class B,F changed;
+```
+
+The result path shown is the normal/handled-error flow. If the executor raises,
+`finally` still logs completion and the exception continues to `ToolNode`'s error
+handling. In a batch, the wrapper runs separately for each call, potentially in
+parallel; the model reads the batch's results after the tool node completes.
+
+### Changed components
+
+| Component | Responsibility |
+|---|---|
+| `agent/middleware.py` | Observe an individual call using local timing/status variables |
+| `agent/graph.py` | Register `wrap_tool_call=wrap_tool_call` on the existing `ToolNode` |
+| `tests/test_middleware.py` | Check pass-through identity, one execution, errors, timing, and graph/history integration |
+
+### Request, executor, and result
+
+`ToolNode` supplies two arguments; the model does not construct or invoke this wrapper:
+
+- `request`: a `ToolCallRequest` containing `tool_call`, the tool, State, and runtime.
+- `execute`: the framework's continuation; `execute(request)` performs the actual
+  validation and tool execution, with the existing error-handling policy.
+
+The wrapper returns the same `ToolMessage` or `Command` object it receives from
+`execute`. Returning the result is necessary for the graph to continue processing
+it. The wrapper is not in `TOOLS` and does not need system-prompt instructions.
+
+`perf_counter()` measures elapsed time. `try/finally` runs the completion log even
+when `execute` raises; there is no broad exception catch, retry, or swallowed error.
+A normal returned result sets status before returning; a propagated exception
+leaves it as `exception`. Local variables keep concurrent calls independent.
+Call IDs correlate interleaved start/end lines.
+
+| Printed status | Meaning |
+|---|---|
+| `success` | The returned `ToolMessage.status` is `success` |
+| `error` | The returned `ToolMessage.status` is `error`, such as a handled validation failure |
+| `exception` | Execution raised before returning a result; the exception propagates |
+| `command` | Execution returned a `Command`, which is passed through unchanged |
+
+These labels do not infer business success from result text. Division by zero
+returns an explanatory string from `calculate`, so its `ToolMessage` can still
+have status `success`. Existing tools return messages; Command pass-through
+preserves the wrapper's ToolNode contract without adding a new tool capability.
+
+### Observation and State updates
+
+Observation logs go to the terminal only. They do not become model messages,
+`tool_history` fields, or SQLite records. `call_tools()` still creates the four-field
+history records after the batch completes, and the reducer still merges them.
+
+`get_tool_history` calls are observed like all other tools, but remain excluded
+from persisted tool history. The wrapper never mutates `request.state`, changes
+arguments, or supplies extra execution records. Older checkpoints remain usable.
+
+### Reading order and exercises
+
+1. Read `agent/middleware.py` and follow `request`, `execute`, and the returned result.
+2. Trace `try`, `return`, and `finally`; explain why logging happens before the result
+   reaches the caller even though `return` is inside `try`.
+3. Find `wrap_tool_call=wrap_tool_call` in `agent/graph.py`; distinguish observing one
+   call from the existing batch-level `call_tools()` function.
+4. Run a calculation, then ask for tool history. Both produce observation logs;
+   only the calculation adds a persisted execution record.
+5. Try division by zero and compare the result text with protocol status.
+6. Read the offline error tests to see handled failures and propagated exceptions.
+
+Illustrative output (call IDs and duration depend on the actual run):
+
+```text
+Tool call started: name=calculate, id=calculation-1
+Tool: Calculating 2.0 add 1.0.
+Tool call finished: name=calculate, id=calculation-1, status=success, elapsed=0.001s
+```
+
+### Verification
+
+From the repository root:
+
+```bash
+uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests/test_middleware.py
+uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests
+```
+
+Tests use mock models and temporary SQLite files. They cover success/error/Command
+result identity, one executor invocation, deterministic elapsed-time reporting,
+exception propagation, per-call batch logs, history queries, unchanged State fields,
+and checkpoint persistence. No private data or live model request is needed.
+
+Offline verification on 2026-11-06: middleware tests **5 passed**, full suite
+**120 passed**, Ruff lint/format passed, and Pyright **0 errors, 0 warnings**.
+No live model API was called.
 
 ## Recording future versions
 
