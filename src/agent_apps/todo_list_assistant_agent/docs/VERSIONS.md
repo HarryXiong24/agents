@@ -12,20 +12,21 @@ English | [简体中文](VERSIONS.zh-CN.md)
 | V4 | SQLite checkpoints, saved conversation selection, and resume after failure | `MessagesState`, Checkpointer, `thread_id`, and console/storage separation |
 | V5 | Rolling summaries, configurable token threshold, local configuration, and Todo naming/storage | Context compression, complete turns, and `RemoveMessage` |
 | V6 | Custom tool-history reducer, execution records, history queries, and an `agent/` package with a central configuration entry point | Incremental State updates, runtime injection, persistence, and model access to custom state |
-| V7 (current) | Per-tool observation middleware with name, call ID, status, and elapsed time | `wrap_tool_call`, request/executor flow, `try/finally`, and observation versus State updates |
+| V7 (current) | Tool observation, human approval, middleware composition, and checkpointed per-call recovery | Wrappers, `interrupt`, `Command(resume=...)`, terminal decisions, and durable tasks |
 
 This document records what each version teaches, what it adds, and how to verify it. Append the same information when a future version adds another building block.
 
 The running code is **version 7**, adding per-tool observation middleware to
-version 6's custom State and history queries. Version 5 covers summary compression,
-version 6 covers State maintenance, and version 7 covers the tool-call wrapper.
+version 6's custom State and history queries, plus human approval and durable
+per-call recovery. Version 5 covers summary compression, version 6 covers State
+maintenance, and version 7 covers composed wrappers, pause/resume, and tasks.
 The current assistant uses Todo names throughout its tools, functions, types,
 and SQLite storage. Versions 1 through 6 describe the learning history rather
 than separate runnable directories.
 
 Code, prompts, tool descriptions, and terminal messages use English. The assistant replies in English by default, with another language available on explicit request. Exit with `exit` or `quit`.
 
-Current Agent execution and persistence modules live under `agent/`, with startup, console, and shared configuration at the application root. Earlier sections retain their historical paths; use the version 6 layout plus version 7's `agent/middleware.py` when navigating current source.
+Current Agent execution and persistence modules live under `agent/`, with startup, console, and shared configuration at the application root. Earlier sections retain their historical paths; use the version 6 layout plus version 7's middleware and console approval flow when navigating current source.
 
 Diagrams show components and data flow. Versions 1-4 have **Model node** and **Tool node**; version 5 adds **Summary node**. Version 6 keeps those three nodes and adds custom state processing inside the tools step. Version 7 adds a wrapper inside `ToolNode` without adding nodes. Storage helpers
 and the console are ordinary Python functions.
@@ -963,136 +964,306 @@ and tool descriptions. Existing documented limits remain: older checkpoints are
 retained, tool side effects and checkpoints use separate transactions, and a
 reduced history limit takes effect at the next tool-node update.
 
-## Version 7: tool call observation middleware
+## Version 7: composed tool middleware and human approval
 
 ### Learning goal and scope
 
-Learn how to wrap each tool call while continuing to build the graph manually.
-This version adds `wrap_tool_call(request, execute)` through `ToolNode.wrap_tool_call`;
-it does not introduce `create_agent()` or LangChain's `AgentMiddleware` decorators.
+Learn two nested middleware layers: an outer approval wrapper controls whether
+execution reaches an inner observation wrapper. The graph is still built manually;
+there is no `create_agent()` or `AgentMiddleware` decorator.
 
-The wrapper prints the tool name and call ID before execution, and status plus
-elapsed seconds after execution. It calls the executor once, preserves its result,
-and lets exceptions propagate. The existing nodes, five tools, State schema,
-shared configuration, todo storage, and checkpoint paths remain unchanged.
-Model-call observation, retries, approvals, budgets, persistent timing fields,
-and multiple wrapper layers are outside this version's scope.
+This version starts with tool observation and extends it with real human-in-the-loop
+(HITL): deletion pauses, the console asks for a decision, and the existing SQLite
+checkpointer preserves pending approvals across restarts. Tools in a batch run
+sequentially inside checkpointed tasks so completed calls are reused during replay.
+
+Defaults require approval only for `delete_todo`; time, calculation, saving, and
+history lookup keep running normally. The same three graph nodes, five tools,
+State fields, todo fields, and database files remain. Retries, separate execution
+budgets, parameter editing, bulk approval, and model-call middleware are outside
+this version's scope.
 
 ### Component diagram
 
-Orange boxes are new. Only summary, model, and tools are registered graph nodes;
-the wrapper, executor, record builder, and reducer boxes describe internal work.
+Orange boxes are new or changed. The only registered graph nodes are summary,
+model, and tools. Tasks, wrappers, console handling, and reducers are not extra
+`add_node()` registrations.
 
 ```mermaid
 flowchart TD
-    I[New user message] --> S[Summary node]
+    I[Console: new message] --> S[Summary node]
     S --> M[Model node]
-    M -->|Tool calls| T[tools node: call_tools]
+    M -->|Requests tools| T[tools node: sequential call_tools]
     M -->|Final answer| E[END]
-    T --> N[ToolNode dispatches each call]
-    N --> B[New: wrap_tool_call logs start]
-    B --> X[execute request: validation and tool execution]
-    X --> F[New: finally logs status and elapsed time]
-    F --> U[call_tools returns messages and new records]
+    T --> K[New: execute_tool task for one call]
+    K --> H[New: approve_tool_call outer wrapper]
+    H -->|Needs human decision| P[interrupt saves pending approval]
+    P --> C[New: console reviews name and arguments]
+    C -->|exit: keep pending| DB[Existing SQLite Checkpointer]
+    C -->|Command resume with same thread_id| K
+    H -->|Approved or not protected| O[observe_tool_call inner observer]
+    O --> X[ToolNode executor]
+    X --> R[Task result: ToolMessage]
+    H -->|Rejected without execution| R
+    R -->|Checkpoint completed result| DB
+    K -->|Replay reuses completed result| U[Batch messages and new history]
+    R -->|After all calls complete| U
     U --> M
-    U --> R[Existing history reducer]
-    R --> CP[Existing SQLite checkpoints]
-    B --> C[Terminal output only]
-    F --> C
+    U --> G[Existing State reducers]
+    G --> DB
     classDef changed fill:#fff3df,stroke:#c76a00,stroke-width:2px;
-    class B,F changed;
+    class T,K,H,P,C changed;
 ```
 
-The result path shown is the normal/handled-error flow. If the executor raises,
-`finally` still logs completion and the exception continues to `ToolNode`'s error
-handling. In a batch, the wrapper runs separately for each call, potentially in
-parallel; the model reads the batch's results after the tool node completes.
+The diagram combines the pause and completed-result paths. On resume, the tools
+node restarts, completed tasks supply saved results, and the interrupted task
+re-enters its approval wrapper. Its `interrupt()` call receives the explicit answer.
 
 ### Changed components
 
 | Component | Responsibility |
 |---|---|
-| `agent/middleware.py` | Observe an individual call using local timing/status variables |
-| `agent/graph.py` | Register `wrap_tool_call=wrap_tool_call` on the existing `ToolNode` |
-| `tests/test_middleware.py` | Check pass-through identity, one execution, errors, timing, and graph/history integration |
+| `config/agent.py` | `approval_tools=("delete_todo",)` in the shared `AgentConfig` |
+| `agent/middleware.py` | Approval, observation, explicit composition, and control-signal-safe error formatting |
+| `agent/graph.py` | `ToolNode` composition and per-call `@task` results in stable sequential order |
+| `console.py` | Review saved requests, approve/reject/exit, and resume by interrupt ID |
+| Prompts/tool descriptions | Explain approval and distinguish rejected requests from executed tools |
+| `tests/test_hitl.py` | Real interrupts, rejection, restart, per-call reuse, and terminal interaction |
+| `tests/test_middleware.py` | Observation pass-through, timing, exceptions, and unchanged history behavior |
 
-### Request, executor, and result
+### Two middleware layers and their order
 
-`ToolNode` supplies two arguments; the model does not construct or invoke this wrapper:
+`tool_call_middleware(request, execute)` connects:
 
-- `request`: a `ToolCallRequest` containing `tool_call`, the tool, State, and runtime.
-- `execute`: the framework's continuation; `execute(request)` performs the actual
-  validation and tool execution, with the existing error-handling policy.
+```text
+approve_tool_call
+    -> observe_tool_call
+        -> execute(request)
+        <- result plus observation log
+    <- result
+```
 
-The wrapper returns the same `ToolMessage` or `Command` object it receives from
-`execute`. Returning the result is necessary for the graph to continue processing
-it. The wrapper is not in `TOOLS` and does not need system-prompt instructions.
+The outer wrapper calls its continuation only after approval, or immediately for
+unprotected tools. A rejection returns an error `ToolMessage` without calling the
+inner observer or executor. Thus human waiting and rejected requests are excluded
+from execution timing. Neither wrapper is a model-facing tool.
 
-`perf_counter()` measures elapsed time. `try/finally` runs the completion log even
-when `execute` raises; there is no broad exception catch, retry, or swallowed error.
-A normal returned result sets status before returning; a propagated exception
-leaves it as `exception`. Local variables keep concurrent calls independent.
-Call IDs correlate interleaved start/end lines.
+The `ToolNode` constructor uses `wrap_tool_call=tool_call_middleware`. The left
+name is the framework hook parameter; the right name is our composition function.
+Our `observe_tool_call` function is the inner observer, not a LangChain
+middleware decorator. It executes its continuation once and returns the same
+`ToolMessage` or `Command` result.
 
-| Printed status | Meaning |
-|---|---|
-| `success` | The returned `ToolMessage.status` is `success` |
-| `error` | The returned `ToolMessage.status` is `error`, such as a handled validation failure |
-| `exception` | Execution raised before returning a result; the exception propagates |
-| `command` | Execution returned a `Command`, which is passed through unchanged |
+Observation prints name, call ID, protocol status, and seconds from `perf_counter()`.
+`try/finally` ensures completion logging even if execution raises. Status `success`
+or `error` comes from `ToolMessage`; a propagated exception is `exception`, and a
+returned `Command` is `command`. Division by zero can still be protocol `success`
+because the calculator returns an explanatory string. These logs are terminal
+output, not State fields or checkpoint records.
 
-These labels do not infer business success from result text. Division by zero
-returns an explanatory string from `calculate`, so its `ToolMessage` can still
-have status `success`. Existing tools return messages; Command pass-through
-preserves the wrapper's ToolNode contract without adding a new tool capability.
+### Real pause and resume
 
-### Observation and State updates
+`approve_tool_call()` calls `interrupt()` with JSON data containing `kind`,
+`tool_name`, `tool_call_id`, and `args`. It does not call `input()`: the console owns
+terminal interaction. Only an explicit `{"approved": true}` decision allows the
+protected executor to run; `false` produces a refusal message. Non-boolean answers
+fail closed rather than being treated as truthy approval.
 
-Observation logs go to the terminal only. They do not become model messages,
-`tool_history` fields, or SQLite records. `call_tools()` still creates the four-field
-history records after the batch completes, and the reducer still merges them.
+The console reads `snapshot.interrupts` on an unfinished conversation:
 
-`get_tool_history` calls are observed like all other tools, but remain excluded
-from persisted tool history. The wrapper never mutates `request.state`, changes
-arguments, or supplies extra execution records. Older checkpoints remain usable.
+- Pending approval: display tool/arguments and ask `Approve this call? [y/n/exit]:`.
+- `y`/`yes`: resume with approval; `n`/`no`: resume with rejection.
+- `exit`/`quit`, Ctrl+C, or Ctrl+D: end the console session and keep the request pending.
+- Blank/unrecognized input: ask again without resuming or executing anything.
+- Ordinary failed work without interrupts: continue using `invoke(None, config)`.
+
+Choices are case-insensitive and trimmed. Decisions are paired with interrupt IDs:
+
+```python
+Command(resume={pending.id: {"approved": True}})
+```
+
+Use the same `thread_id` and checkpoint database. A new protected call in the same
+batch produces another approval, reviewed next. Approval answers are not chat
+messages; a paused run does not print a final assistant answer or accept a new
+user turn. Restarting and selecting the same conversation returns to its review.
+Rejection completes that tool request, then the model can explain it; it is not
+`END` or a permanent tool ban. Prompts request no retries without a new user request,
+which remains guidance to the model.
+
+`handle_tool_error()` is important here. `ToolNode` catches exceptions from wrappers
+as well as tools; our handler re-raises `GraphBubbleUp` control signals, including
+`GraphInterrupt`, instead of converting a pause into a normal error message.
+Other errors keep the existing `TOOL_ERROR_MESSAGE` response. This is not a broad
+exception-swallowing block.
+
+### From interrupt back to the console
+
+The first `interrupt(payload)` does not assign a decision and continue through
+the approval function. It raises a graph control signal, which LangGraph handles
+by saving pending work and returning an interrupted result to the caller.
+The graph is paused; the Python process can continue terminal interaction.
+
+Follow the actual handoff in `console.py`:
+
+| Step | Code location | What happens |
+|---|---|---|
+| 1 | `chat()`: `result = graph.invoke(...)` | Returns a result containing `__interrupt__` |
+| 2 | Summary comparison, then `if result.get("__interrupt__"): continue` | Reports committed compaction before starting the next console loop without a final answer |
+| 3 | `snapshot = graph.get_state(config)` | Restores the pending interrupt information |
+| 4 | `review_approvals(snapshot.interrupts)` | Displays the request and waits at `input()` |
+| 5 | `graph.invoke(Command(resume=decisions), config=config)` | Supplies a decision under the saved interrupt ID |
+| 6 | The interrupted task replays | Its matching `interrupt()` returns `{"approved": True}` or `{"approved": False}`, then approval handling continues |
+
+`tool_call_id` pairs a model tool request with its `ToolMessage`; the interrupt's
+`id` pairs a pending approval with its resume answer. The `thread_id` selects the
+conversation. These identifiers have different responsibilities.
+
+### Why checkpoint individual tool calls
+
+A paused node restarts from its beginning. Simply calling a batched `ToolNode`
+inside `call_tools()` could repeat a completed save when a later deletion pauses.
+`execute_tool()` uses LangGraph's `@task` to checkpoint each completed `ToolMessage`.
+It receives serializable State and one tool call; runtime/config are inherited
+from the graph context rather than serialized as task arguments.
+
+`call_tools()` waits for each task in original request order. This keeps task replay
+stable and makes approvals sequential. A checkpointed completed task returns its
+saved result, skipping both middleware and execution. An interrupted task restarts
+and reads its saved resume answer. This remains three graph nodes; `@task` is a
+checkpoint boundary inside the tools node.
+
+The input passed to each task preserves the original pre-batch State and isolates
+one tool request for `ToolNode`. History queries still see only records from before
+this batch; query in a later model step to include its completed records.
+The tools node returns messages/history after the entire batch completes. While
+paused, earlier calls may already have committed business changes even though
+this batch's message/history updates are not yet in State.
+
+Task results and todo commits are separate transactions. A process crash after
+committing a todo change but before saving its task result may still cause replay.
+This mechanism reuses checkpointed results; it does not guarantee exactly-once
+side effects. Direct Python tool/storage calls bypass graph middleware.
+
+### The task decorator and single-request copy
+
+The decorator syntax `@task` is approximately `execute_tool = task(execute_tool)`:
+it wraps the original function in LangGraph's task mechanism. Calling it inside a
+graph node returns a Future; `.result()` waits for its `ToolMessage` or propagates
+an interruption/failure. The function body's return annotation describes that
+message, while the decorated call initially returns the Future.
+
+```python
+future = execute_tool(state, call)
+message = future.result()
+```
+
+Task replay restores the result for that workflow step. New user turns still
+create new calls; identical arguments do not make this a global permanent cache.
+Use tasks within LangGraph execution, provide a checkpointer for persistence, and
+keep task inputs/outputs serializable. Ordinary validation and small pure helpers
+can stay ordinary functions.
+
+The original `AIMessage` can contain several tool requests. This line creates a
+new message with only the current one, leaving the original message unchanged:
+
+```python
+single_request = request.model_copy(update={"tool_calls": [call]})
+```
+
+Otherwise every per-call task could dispatch the entire batch again. A new State
+dictionary replaces only the final message with this copy while retaining summary,
+history, and earlier messages. `ToolNode` receives one request, so the task returns
+its single `updates["messages"][0]`. This isolates one result per task without
+mutating the shared message list or adding a graph node.
+
+### State, configuration, and compatibility
+
+`AgentConfig.approval_tools` is a tuple of tool names, defaulting to `("delete_todo",)`.
+Edit it in `config/agent.py` and restart; `()` intentionally disables approvals.
+No environment variable, new business field, approval database, or extra State
+schema is introduced. Resumable direct graph callers must supply a checkpointer;
+console startup already keeps the existing `SqliteSaver` open. Keep approval
+configuration and task call ordering stable while work is pending.
+
+Pending approval payloads and completed task results live in the checkpoint system.
+A resolved rejected request becomes a normal error tool result, and `call_tools()`
+records its refusal text in the existing four-field `tool_history`. It must not be
+presented as an executed deletion. Pending requests have no result record yet.
+History lookups remain excluded from persisted history, and summaries still do
+not run inside an active tool chain. Existing conversations and database paths
+remain usable.
 
 ### Reading order and exercises
 
-1. Read `agent/middleware.py` and follow `request`, `execute`, and the returned result.
-2. Trace `try`, `return`, and `finally`; explain why logging happens before the result
-   reaches the caller even though `return` is inside `try`.
-3. Find `wrap_tool_call=wrap_tool_call` in `agent/graph.py`; distinguish observing one
-   call from the existing batch-level `call_tools()` function.
-4. Run a calculation, then ask for tool history. Both produce observation logs;
-   only the calculation adds a persisted execution record.
-5. Try division by zero and compare the result text with protocol status.
-6. Read the offline error tests to see handled failures and propagated exceptions.
+1. Read `approve_tool_call()`, `observe_tool_call()`, and `tool_call_middleware()` in
+   `agent/middleware.py`; follow outer-to-inner calls and inner-to-outer returns.
+2. Find `interrupt()` and explain why terminal input belongs in `console.py`.
+3. Follow `review_approvals()` and the two recovery branches in `chat()`;
+   distinguish explicit resume answers from ordinary `invoke(None, config)`.
+4. Follow `execute_tool()` and `.result()` in `agent/graph.py`. Explain why tasks
+   are sequential and why a saved task result avoids repeating earlier calls.
+5. Save a todo, request deletion, then approve. Repeat with rejection and verify
+   the todo remains. Observation starts only for an allowed execution.
+6. Exit at the approval prompt, restart, select the same conversation, and reject
+   or approve the saved request. No new user message is needed to resume it.
+7. Use the offline multi-call test to inspect a save followed by two deletions:
+   approve the first, reopen the graph, and reject the second without repeating
+   completed calls.
 
-Illustrative output (call IDs and duration depend on the actual run):
+Illustrative trace (IDs and elapsed time vary):
 
 ```text
-Tool call started: name=calculate, id=calculation-1
-Tool: Calculating 2.0 add 1.0.
-Tool call finished: name=calculate, id=calculation-1, status=success, elapsed=0.001s
+Human approval required
+Tool: delete_todo
+Call ID: delete-1
+Arguments: {"project": "Clean room", "date": "2026-11-06"}
+Approve this call? [y/n/exit]: y
+Tool call started: name=delete_todo, id=delete-1
+Tool: Deleted todo: Clean room, 2026-11-06.
+Tool call finished: name=delete_todo, id=delete-1, status=success, elapsed=0.001s
+Assistant: ...
 ```
+
+The inline arguments above abbreviate the console's indented JSON display.
 
 ### Verification
 
-From the repository root:
-
 ```bash
-uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests/test_middleware.py
+uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests/test_hitl.py src/agent_apps/todo_list_assistant_agent/tests/test_middleware.py
 uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests
 ```
 
-Tests use mock models and temporary SQLite files. They cover success/error/Command
-result identity, one executor invocation, deterministic elapsed-time reporting,
-exception propagation, per-call batch logs, history queries, unchanged State fields,
-and checkpoint persistence. No private data or live model request is needed.
+Offline tests cover approval/rejection, no premature execution, middleware order,
+strict boolean decisions, preserved interrupt signals, multiple approvals,
+completed-task reuse, a fresh Python process, terminal exit/restart, invalid input,
+Ctrl+C/Ctrl+D, matching tool messages, and the existing observation/history behavior.
+They use mock models and temporary databases, not private data or live model APIs.
 
-Offline verification on 2026-11-06: middleware tests **5 passed**, full suite
-**120 passed**, Ruff lint/format passed, and Pyright **0 errors, 0 warnings**.
-No live model API was called.
+### Final review and verification
+
+Version 7 was finalized on 2026-11-06 after a fresh full review and an independent
+Agent review. The final observer name is `observe_tool_call`; `wrap_tool_call`
+remains the framework's hook parameter in `ToolNode`.
+
+The review found and fixed one console notification regression: summary compaction
+before an approval pause skipped its notice. The console now reports the committed
+summary before entering approval review, without printing a final assistant answer
+or repeating the notice after approval. A real-graph/SQLite regression test first
+reproduced the failure, then passed after the fix.
+
+Final verification:
+
+- Full offline suite: **138 passed**; Ruff lint and formatting: passed.
+- Pyright: **0 errors, 0 warnings**.
+- Independent probes checked unanswered approval, post-approval failure recovery,
+  per-turn task-cache isolation, batch recovery, and the notification fix.
+- English/Chinese links, Markdown fences, all seven diagrams/overview rows, and
+  byte-identical `AGENTS.md`/`CLAUDE.md`: checked.
+
+No unresolved code defects were found in the reviewed scope. Tests used mock
+models and temporary storage; no live model API, private configuration, or personal
+database was used. The documented transaction and replay limitations still apply.
 
 ## Recording future versions
 

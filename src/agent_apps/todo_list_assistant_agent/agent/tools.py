@@ -76,6 +76,7 @@ def delete_todo(project: str, date: str) -> str:
     project is the todo name; date must use YYYY-MM-DD. Duration is not required.
     Example: project="Clean room", date="2026-11-04".
     Ask if the name or date is unclear; resolve relative dates with the time tool.
+    By default, the graph pauses for separate human approval before execution.
     Delete only the matching todo. If missing, report that and preserve other todos.
     Saying a todo is done does not authorize deletion; there is no completion field.
     """
@@ -100,11 +101,12 @@ def delete_todo(project: str, date: str) -> str:
 # A standalone tool.invoke({}) does not create this runtime automatically.
 @tool
 def get_tool_history(runtime: ToolRuntime[None, AgentState]) -> str:
-    """Read retained recent tool executions in the current conversation.
+    """Read retained recent tool call results in the current conversation.
 
     Use when the user asks which tools ran, their arguments, results, or timestamps.
     Returns a JSON list, ordered oldest to newest; an empty list means no records.
     Records come from the current conversation state, including restored checkpoints.
+    Rejected requests are included; their result states that execution was declined.
     This read-only lookup excludes its own calls and never executes recorded calls.
     If other tools run in the same batch, their new records appear only after that
     batch completes. Call this tool in a later step to include those executions.

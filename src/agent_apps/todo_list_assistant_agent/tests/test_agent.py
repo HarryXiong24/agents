@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.errors import GraphRecursionError
+from langgraph.types import Command
 
 from agent_apps.todo_list_assistant_agent import config, console
 from agent_apps.todo_list_assistant_agent import main as app
@@ -426,7 +427,7 @@ def test_one_batch_can_save_multiple_todos():
     )
 
 
-def test_delete_tool_refreshes_prompt_and_survives_new_graph():
+def test_delete_tool_refreshes_prompt_and_survives_new_graph(checkpointer):
     memory.save_todo("Python", 60, "2026-10-29")
     remaining = memory.save_todo("English", 30, "2026-10-29")
     model = make_model(
@@ -442,8 +443,13 @@ def test_delete_tool_refreshes_prompt_and_survives_new_graph():
         ),
         AIMessage(content="Deleted the Python todo."),
     )
-    result = build_graph(model).invoke(
-        {"messages": [HumanMessage("Delete the Python todo for 2026-10-29.")]}
+    graph = build_graph(model, checkpointer)
+    config: RunnableConfig = {"configurable": {"thread_id": "approved-delete"}}
+    paused = graph.invoke(
+        {"messages": [HumanMessage("Delete the Python todo for 2026-10-29.")]}, config
+    )
+    result = graph.invoke(
+        Command(resume={paused["__interrupt__"][0].id: {"approved": True}}), config
     )
     assert "Deleted todo" in result["messages"][2].content
     assert memory.load_todos() == [remaining]
@@ -473,7 +479,9 @@ def test_console_explains_database_error(monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("missing_date", [True, False])
-def test_delete_errors_do_not_report_success(monkeypatch, capsys, missing_date):
+def test_delete_errors_do_not_report_success(
+    monkeypatch, capsys, missing_date, checkpointer
+):
     saved = memory.save_todo("Python", 60, "2026-10-29")
     args = {"project": "Python"}
     if not missing_date:
@@ -490,8 +498,11 @@ def test_delete_errors_do_not_report_success(monkeypatch, capsys, missing_date):
         ),
         AIMessage(content="Deletion did not succeed."),
     )
-    result = build_graph(model).invoke(
-        {"messages": [HumanMessage("Delete this todo.")]}
+    graph = build_graph(model, checkpointer)
+    config: RunnableConfig = {"configurable": {"thread_id": "failed-delete"}}
+    paused = graph.invoke({"messages": [HumanMessage("Delete this todo.")]}, config)
+    result = graph.invoke(
+        Command(resume={paused["__interrupt__"][0].id: {"approved": True}}), config
     )
     assert result["messages"][2].status == "error"
     assert "Deleted" not in capsys.readouterr().out

@@ -8,7 +8,7 @@ from ..config import agent as agent_settings
 
 
 class ToolCallRecord(TypedDict):
-    """Describe one tool execution; the producing node fills in these fields."""
+    """Describe a completed tool request, including a request rejected by a human."""
 
     tool_name: str
     # Tool argument names are strings; values may have different JSON-compatible types.

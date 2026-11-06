@@ -39,7 +39,7 @@ def test_observer_passes_request_and_result_through_once(
     execute = Mock(return_value=result)
     monkeypatch.setattr(middleware, "perf_counter", Mock(side_effect=[10, 10.125]))
 
-    assert middleware.wrap_tool_call(request, execute) is result
+    assert middleware.observe_tool_call(request, execute) is result
 
     execute.assert_called_once_with(request)
     assert request.state == {"summary": "Original."}
@@ -60,7 +60,7 @@ def test_observer_reports_exception_and_preserves_it(monkeypatch, capsys):
     monkeypatch.setattr(middleware, "perf_counter", Mock(side_effect=[10, 10.25]))
 
     with pytest.raises(RuntimeError) as caught:
-        middleware.wrap_tool_call(request, execute)
+        middleware.observe_tool_call(request, execute)
 
     assert caught.value is error
     execute.assert_called_once_with(request)

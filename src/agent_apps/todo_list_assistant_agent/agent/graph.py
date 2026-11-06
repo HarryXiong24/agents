@@ -4,15 +4,16 @@ from datetime import datetime
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
-from langchain_core.runnables import RunnableConfig
+from langchain_core.messages.tool import ToolCall
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.func import task
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from ..config import agent as agent_settings
 from . import memory
-from .middleware import wrap_tool_call
-from .prompts import TOOL_ERROR_MESSAGE, build_system_prompt
+from .middleware import handle_tool_error, tool_call_middleware
+from .prompts import build_system_prompt
 from .state import AgentState, ToolCallRecord
 from .summarization import summarize_conversation
 from .tools import TOOLS, get_tool_history
@@ -22,16 +23,29 @@ def build_graph(
     model: BaseChatModel,
     checkpointer: BaseCheckpointSaver | None = None,
 ):
-    """Keep summaries in graph state and use the base model without tools for them."""
+    """Build the loop; provide a checkpointer to resume human approval and failures."""
     agent_config = agent_settings.AGENT_CONFIG
     # Expose tool schemas to the model. Binding does not execute any tools.
     model_with_tools = model.bind_tools(TOOLS)
     tool_node = ToolNode(
         TOOLS,
-        handle_tool_errors=TOOL_ERROR_MESSAGE,
-        # Observe each individual call; call_tools still produces State updates.
-        wrap_tool_call=wrap_tool_call,
+        handle_tool_errors=handle_tool_error,
+        wrap_tool_call=tool_call_middleware,
     )
+
+    @task
+    def execute_tool(state: AgentState, call: ToolCall) -> ToolMessage:
+        """Checkpoint one call's result so replay can reuse completed executions."""
+        request = state["messages"][-1]
+        if not isinstance(request, AIMessage):
+            raise TypeError("The tool task requires an AIMessage.")
+        # Isolate one request while preserving the pre-batch State for runtime injection.
+        single_request = request.model_copy(update={"tool_calls": [call]})
+        tool_state = {**state, "messages": [*state["messages"][:-1], single_request]}
+        # RunnableConfig is inherited from the task's graph context, not serialized
+        # as an argument. Inputs and returned ToolMessage are checkpoint-serializable.
+        updates = tool_node.invoke(tool_state)
+        return updates["messages"][0]
 
     # A node returns a partial state update.
     def call_model(state: AgentState):
@@ -44,15 +58,17 @@ def build_graph(
         # MessagesState appends new message IDs and replaces matching IDs.
         return {"messages": [response]}
 
-    def call_tools(state: AgentState, config: RunnableConfig):
-        """Execute tools and return their messages alongside new history records."""
+    def call_tools(state: AgentState):
+        """Process tool requests and return messages alongside new history records."""
         request = state["messages"][-1]
         if not isinstance(request, AIMessage):
             raise TypeError("The tool node requires an AIMessage with tool calls.")
 
-        # Keep ToolNode's execution and error handling; forward the graph's config.
-        updates = tool_node.invoke(state, config=config)
-        tool_messages: list[ToolMessage] = updates["messages"]
+        # Stable task order lets checkpoints match cached results after a restart.
+        # Wait for each call before starting the next; approvals never race for input.
+        tool_messages = [
+            execute_tool(state, call).result() for call in request.tool_calls
+        ]
         # Match by call ID because one model reply can request several tools.
         calls_by_id = {call["id"]: call for call in request.tool_calls}
         records: list[ToolCallRecord] = []

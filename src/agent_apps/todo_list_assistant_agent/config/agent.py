@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class AgentConfig:
-    """Configure summary and execution limits; use positive integers for all fields."""
+    """Configure summaries, execution limits, and tools requiring human approval."""
 
     # Trigger compression when estimated conversation history reaches this threshold.
     summary_trigger_tokens: int = 500
@@ -15,6 +15,8 @@ class AgentConfig:
     recursion_limit: int = 20
     # Retain this many recent tool executions in each conversation's State.
     tool_history_limit: int = 10
+    # Pause these tools before execution; the console supplies approval decisions.
+    approval_tools: tuple[str, ...] = ("delete_todo",)
 
 
 # One shared object; creating it does not read files or require model credentials.

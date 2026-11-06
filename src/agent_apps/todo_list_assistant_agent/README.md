@@ -4,8 +4,8 @@ English | [简体中文](README.zh-CN.md)
 
 A console-based Todo List Assistant Agent built with LangGraph. It combines five local
 tools, three graph nodes, rolling conversation summaries, SQLite checkpoints,
-SQLite todo storage, and a custom State reducer retaining the recent tool
-execution records. Each todo has exactly three fields: `project` (name), `minutes`
+SQLite todo storage, and a custom State reducer retaining recent tool
+call results, including rejected requests. Each todo has exactly three fields: `project` (name), `minutes`
 (estimated duration), and `date` (scheduled date).
 
 Code comments, tool descriptions, prompts, and terminal messages are in English.
@@ -18,7 +18,7 @@ explicitly requested. This README describes current usage and design; the
 | `get_current_time` | Read the computer's local date and time |
 | `calculate` | Add, subtract, multiply, or divide numbers |
 | `save_todo` | Add a todo or update its estimated duration for the same name/date |
-| `delete_todo` | Delete the todo matching a name and scheduled date |
+| `delete_todo` | Delete the matching todo after human approval |
 | `get_tool_history` | Read the current conversation's retained recent tool executions |
 
 ## Todo fields and storage
@@ -142,7 +142,8 @@ The console sends only the new `HumanMessage`. `AgentState` extends `MessagesSta
 Before the first model call of each new user turn, the summary node estimates tokens in the existing summary and message history. At or above the configured threshold, it combines the old summary with older completed turns, keeping the latest **two completed user turns plus the current turn** in their original form. A turn includes all of its tool requests, results, and final answer; it is not a single message.
 
 Edit `AgentConfig` in `config/agent.py` and restart. Agent settings are defined
-in Python; `.env` contains only model settings. All four values should be positive integers:
+in Python; `.env` contains only model settings. The four numeric values should be
+positive integers; `approval_tools` lists tools that require human approval:
 
 ```python
 @dataclass(frozen=True)
@@ -151,6 +152,7 @@ class AgentConfig:
     summary_keep_turns: int = 2
     recursion_limit: int = 20
     tool_history_limit: int = 10
+    approval_tools: tuple[str, ...] = ("delete_todo",)
 ```
 
 For a lower summary threshold, change `summary_trigger_tokens` to `300`;
@@ -158,11 +160,13 @@ for less frequent compression, try `6000`. `summary_keep_turns` controls how man
 completed turns remain verbatim. `recursion_limit` bounds graph steps per invocation,
 including summary/model/tool nodes; it is not a separate tool-call count.
 `tool_history_limit` controls retained execution records per conversation.
+Set `approval_tools=()` only when you intentionally want to disable approval.
 These settings are developer-maintained defaults without runtime constructor validation.
 
 The threshold counts only the summary and conversation messages, excluding fixed system instructions, saved todos, and tool definitions. It uses LangChain's approximate character-based counter, not Groq's exact tokenizer. Four or five sufficiently detailed turns may trigger compression at 500, but very short exchanges can take longer. Lowering the threshold still cannot compress until there are older turns beyond the two retained turns.
 
-For a quick test, create a conversation and discuss household chores, work tasks, available time, and scheduling preferences in four successive messages. Ask for reasonably detailed replies. After compression, a successful turn prints:
+For a quick test, create a conversation and discuss household chores, work tasks, available time, and scheduling preferences in four successive messages. Ask for reasonably detailed replies. When compression commits, the console prints the notice below, including before
+a pending tool approval:
 
 ```text
 Context: Earlier conversation summarized; recent turns kept.
@@ -176,7 +180,7 @@ Compression updates the current graph state using `RemoveMessage`. Older checkpo
 
 ## State and tool execution history
 
-`ToolCallRecord` describes each execution. The optional `tool_history` field uses the custom
+`ToolCallRecord` describes each completed tool request, including human rejections. The optional `tool_history` field uses the custom
 `add_tool_history(old, new)` reducer, which reads the shared `AGENT_CONFIG`. `messages` merges by message ID, `summary`
 is replaced when updated, and `tool_history` concatenates updates while retaining
 the configured number of recent entries (ten by default). Nodes return only their new values; LangGraph applies each
@@ -203,39 +207,88 @@ Reducing `tool_history_limit` applies when the next tool-node update is merged.
 Restoring a checkpoint does not itself run reducers, so saved records can exceed
 a newly reduced limit until then; a first history lookup can return that older list.
 
-## Tool call observation
+## Human approval and tool observation
 
-`agent/middleware.py` defines the synchronous `wrap_tool_call(request, execute)`
-wrapper. `ToolNode` calls it automatically through `wrap_tool_call=wrap_tool_call`
-for every tool request, including history lookups. It prints the tool name and
-call ID before execution, then the returned status and elapsed seconds afterward.
-For example, this is an illustrative trace; duration varies:
+Deletion requires human approval by default. When the model requests `delete_todo`,
+`approve_tool_call()` calls `interrupt()` before the tool executes. The graph saves
+its pending work, then the console displays the tool name, call ID, and arguments:
 
 ```text
-Tool call started: name=calculate, id=calculation-1
-Tool: Calculating 2.0 add 1.0.
-Tool call finished: name=calculate, id=calculation-1, status=success, elapsed=0.001s
+Human approval required
+Tool: delete_todo
+Call ID: delete-1
+Arguments:
+{
+  "project": "Clean room",
+  "date": "2026-11-06"
+}
+Approve this call? [y/n/exit]:
 ```
 
-`request` holds the tool call, State, and runtime; `execute(request)` continues the
-framework's tool execution. The wrapper executes it once and returns the same
-result. It is not registered as a tool and requires no prompt instruction.
-Concurrent calls can interleave output; their IDs keep start/end lines correlated.
-In `wrap_tool_call=wrap_tool_call`, the left name is the `ToolNode` constructor
-parameter; the right name is our function imported from `agent/middleware.py`.
+Enter `y`/`yes` to approve, `n`/`no` to reject, or `exit`/`quit` to leave the approval
+pending and exit. Choices are case-insensitive and whitespace is trimmed. Blank or
+unrecognized input asks again. Ctrl+C/Ctrl+D also exit without approving anything.
+Restart, select the same conversation, and review the saved request before sending
+new chat input. Keep approval configuration and task ordering stable while work is
+pending. Rejection returns an error `ToolMessage` stating that execution was declined; the model can explain the outcome. It does not delete the todo or end the
+graph automatically. Prompts tell the model not to retry rejected operations
+without a new user request; this is model guidance, not a permanent tool ban.
 
-`success` and `error` come from `ToolMessage.status`, not a separate interpretation
-of business results. A calculator response explaining division by zero can still
-have protocol status `success`. A propagated exception is logged as `exception`
-and continues to `ToolNode`'s existing error handling; a returned `Command` is
-logged as `command` and passed through. A `finally` block reports elapsed time
-even when execution raises.
+`console.py` detects pending interrupts separately from ordinary failed work.
+Approvals resume with `Command(resume={interrupt_id: {"approved": True}})`
+(use `False` to reject) and the same `thread_id`; ordinary failed work still uses `invoke(None, config)`.
+The console does not add approval answers as `HumanMessage`s or print a final
+assistant answer while the graph is paused. Multiple protected calls are reviewed
+one at a time, in request order. There is no argument editing or bulk approval.
 
-These observation lines are terminal output, not model messages or checkpointed
-fields. The wrapper does not update State, retry tools, or add graph nodes.
-`call_tools()` continues to return the existing tool-history updates, excluding
-history lookups. The graph still has three nodes and five tools, and uses a
-synchronous console flow.
+`agent/middleware.py` contains two wrappers composed by `tool_call_middleware()`:
+
+```text
+Tool request -> approve_tool_call (outer)
+                  |-- approved / approval not required
+                  |       -> observe_tool_call (observe) -> execute(request)
+                  |       <- returned result and elapsed-time log
+                  |-- rejected -> error ToolMessage, without execution
+```
+
+`ToolNode` receives `wrap_tool_call=tool_call_middleware`. The left name is its
+constructor parameter; the right function connects approval outside observation.
+The `observe_tool_call(request, execute)` function handles observation.
+It runs only when execution is allowed, so its elapsed time excludes human waiting
+and rejected calls produce no execution observation lines. Its `finally` block logs
+returned protocol status or a propagated exception. `ToolMessage.status` is not a
+business-success detector: division by zero can return an explanatory string with
+status `success`. `Command` results are passed through by the wrapper.
+
+`handle_tool_error()` re-raises graph control signals such as approval interrupts;
+ordinary tool errors retain the existing generic error message. Middleware is not
+registered as a tool and requires no prompt instruction to run. Approval requests
+and execution decisions are enforced by code on the graph path; direct Python
+calls to storage functions or tool objects do not pass through this middleware.
+
+### Checkpointed tool calls
+
+`call_tools()` processes a batch sequentially. Each call runs inside an
+`execute_tool()` task (`@task`), whose completed `ToolMessage` is checkpointed.
+On approval resume, the tools node replays, but completed tasks return their saved
+results. For example, a save before a pending deletion does not execute again
+when you reopen the conversation and approve the deletion.
+
+The task and middleware functions are not additional graph nodes: the graph still
+has summary, model, and tools nodes, and five tools. Each tool sees the original
+pre-batch State, so query history in a later model step to include this batch.
+`call_tools()` returns messages and new history records after the whole batch
+completes. While paused, some earlier tools may already have committed changes,
+but their batch's message/history updates have not yet been returned.
+
+Observation lines are terminal output, not model messages or checkpoint fields.
+Resolved rejected requests are recorded in `tool_history` with their refusal text;
+pending requests have no result record yet. History lookups remain excluded.
+Use a checkpointer for resumable approvals; console startup already supplies the
+existing `SqliteSaver`. No database migration or additional business fields are needed.
+Tool side effects and checkpoint writes remain separate transactions, so a process
+crash after a database commit but before its task result is saved can still cause
+re-execution. Cached completed tasks do not provide an exactly-once guarantee.
 
 ## SQLite todo storage
 
@@ -271,6 +324,10 @@ The application creates missing database files and tables on first use. Without 
 
 ```text
 You: Delete the Clean room todo for 2026-11-04.
+Human approval required
+Tool: delete_todo
+Arguments: {"project": "Clean room", "date": "2026-11-04"}
+Approve this call? [y/n/exit]: y
 Tool: Deleted todo: Clean room, 2026-11-04.
 Assistant: ...
 ```
@@ -299,7 +356,7 @@ todo_list_assistant_agent/
 │   ├── graph.py                  # Summary, model, and tool nodes
 │   ├── state.py                  # Messages, summary, and tool-history reducer
 │   ├── tools.py                  # Time, arithmetic, todos, and history lookup
-│   ├── middleware.py             # Per-tool status and elapsed-time observation
+│   ├── middleware.py             # Approval, observation, and composition
 │   ├── model.py                  # Chat model creation
 │   ├── prompts.py                # Template loading and dynamic prompt formatting
 │   ├── summarization.py          # Token estimate and summary updates
@@ -335,7 +392,7 @@ Filenames use lowercase and Python constants use uppercase; their casing does no
 `main.py` opens the saver, gets `threads = checkpoints.list_threads(checkpointer)`, and passes that ordinary list to `select_thread(threads)` in `console.py`. The menu does not access the database. `agent/checkpoints.py` owns `CHECKPOINTS_FILE` and the SQL used to list saved conversations; `console.py` owns `select_thread()` and `chat()`. Startup enters the conversation menu directly, without command-line argument parsing.
 
 `config/` has three responsibility modules. `agent.py` defines `AgentConfig`:
-summary settings, graph execution steps, and tool history retention. `model.py`
+summary settings, graph execution steps, tool history retention, and approval tools. `model.py`
 defines and parses `ModelConfig`. `app.py` owns paths, `AppConfig`, the single
 `read_env()` function, and `load_config()` assembly. Only model settings are read
 from `.env`; `config/agent.py` creates one shared `AGENT_CONFIG = AgentConfig()` object.
@@ -359,7 +416,11 @@ without changing the application's default file location.
 
 Both files survive restart and are excluded from Git. The latest graph state keeps recent original messages, a lossy historical summary, and recent tool execution records per conversation (up to ten by default). Choose `0` at startup for a fresh conversation. Run one console at a time for a given conversation.
 
-Expected graph/API/storage errors end the console session and preserve whatever checkpoints were successfully saved. On restart, `get_state(config).next` detects unfinished work and `invoke(None, config)` continues it before new input is accepted. Completed checkpointed steps are reused; a node interrupted before its result was saved may run again. Checkpoints and todo writes are separate transactions, so this is not an exactly-once guarantee for tool side effects. A later model failure does not roll back a committed todo change.
+Expected graph/API/storage errors end the console session and preserve whatever checkpoints were successfully saved. On restart, `get_state(config).next` detects unfinished work. Ordinary failed work
+continues with `invoke(None, config)`; saved approval interrupts require an explicit
+decision through `Command(resume=...)` before new input is accepted. Completed checkpointed steps are reused; a node interrupted before its result was saved may run again. Checkpoints and todo writes are separate transactions, so this is not an exactly-once guarantee for tool side effects. A later model failure does not roll back a committed todo change.
+Human approval pauses are resumed through explicit decisions, not automatic failure recovery;
+completed per-call task results are reused while replaying a partially completed batch.
 
 The calculator uses floating-point arithmetic for everyday duration calculations, rather than exact financial accounting.
 
@@ -378,4 +439,4 @@ From the repository root:
 uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests
 ```
 
-Tests use simulated models, temporary configuration files, and temporary databases without real API keys or network. They cover configuration isolation, threshold boundaries, rolling summaries, tool-pair preservation, failed summary recovery, cross-process restoration, pending todo tool recovery, bounded tool history, read-only history queries, runtime injection, summary preservation of tool records, todo CRUD, Unicode input and storage, and per-tool observation with unchanged results, errors, and State.
+Tests use simulated models, temporary configuration files, and temporary databases without real API keys or network. They cover configuration isolation, threshold boundaries, rolling summaries, tool-pair preservation, failed summary recovery, cross-process restoration, pending todo tool recovery, bounded tool history, read-only history queries, runtime injection, summary preservation of tool records, todo CRUD, Unicode input and storage, per-tool observation, approval/rejection, terminal exit/restart, sequential approvals, and cross-process reuse of completed tasks.

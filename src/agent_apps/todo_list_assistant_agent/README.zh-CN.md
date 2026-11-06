@@ -14,7 +14,7 @@ SQLite 会话检查点、待办数据库，以及通过自定义 State reducer �
 | `get_current_time` | 获取电脑本地日期和时间 |
 | `calculate` | 加、减、乘、除运算 |
 | `save_todo` | 新增待办，或更新同名同日期待办的预计耗时 |
-| `delete_todo` | 按名称和安排日期删除指定待办 |
+| `delete_todo` | 人工批准后，按名称和安排日期删除指定待办 |
 | `get_tool_history` | 读取当前会话保留的近期工具执行 |
 
 ## 待办字段与存储
@@ -140,7 +140,8 @@ Assistant: That is 315 minutes, or 5.25 hours.
 每个新用户轮次第一次调用模型之前，摘要节点估算“已有摘要＋消息历史”的 token 数。达到配置阈值后，用“旧摘要＋较早的完整对话”生成新摘要，原样保留最近 **2 个完整用户轮次＋当前轮**。一轮包含工具请求、工具结果和最终回答，并不是一条消息。
 
 修改 `config/agent.py` 的 `AgentConfig` 后重启。Agent 参数直接写在 Python 中，
-`.env` 只保存模型配置；下面四项都应使用正整数：
+`.env` 只保存模型配置；下面四个数值参数都应使用正整数，
+`approval_tools` 指定需要人工审批的工具：
 
 ```python
 @dataclass(frozen=True)
@@ -149,16 +150,18 @@ class AgentConfig:
     summary_keep_turns: int = 2
     recursion_limit: int = 20
     tool_history_limit: int = 10
+    approval_tools: tuple[str, ...] = ("delete_todo",)
 ```
 
 降低摘要触发阈值可将 `summary_trigger_tokens` 改成 `300`，减少触发频率可改为 `6000`。
 `summary_keep_turns` 控制保留原文的完整轮数；`recursion_limit` 限制每次图调用的执行步数，
 包含摘要、模型和工具节点，不等于工具调用次数限制；`tool_history_limit` 控制每个会话
-保留的工具执行记录条数。这些参数由开发者维护，不在构造配置对象时进行运行时校验。
+保留的工具执行记录条数。只有明确希望关闭审批时才将 `approval_tools` 设为 `()`。
+这些参数由开发者维护，不在构造配置对象时进行运行时校验。
 
 阈值只统计摘要和对话消息，不含固定系统指令、待办事项和工具定义。使用 LangChain 基于字符的 token 估算，不是 Groq 模型精确的 tokenizer。500 适合在约 4～5 轮较详细的交流后观察，但很短的问答可能需要更多轮。即使降低阈值，也必须有超出最近两轮之外的旧对话才能压缩。
 
-快速体验时，新建会话，依次讨论家务、工作事项、可用时间和安排偏好，请助手适当展开回答。成功压缩并完成本轮时会显示：
+快速体验时，新建会话，依次讨论家务、工作事项、可用时间和安排偏好，请助手适当展开回答。压缩成功保存后会显示下面的提示，包括本轮随后暂停审批的情况：
 
 ```text
 Context: Earlier conversation summarized; recent turns kept.
@@ -172,7 +175,7 @@ Context: Earlier conversation summarized; recent turns kept.
 
 ## State 维护与工具执行记录
 
-`ToolCallRecord` 描述单条执行记录；可选的 `tool_history` 字段使用自定义
+`ToolCallRecord` 描述一次已完成请求（包括人工拒绝）；可选的 `tool_history` 字段使用自定义
 `add_tool_history(old, new)` reducer。`messages` 按消息 ID 合并，`summary` 在更新时覆盖，
 `tool_history` 将新旧记录拼接后保留最近十条。节点只返回本次更新，LangGraph 按字段规则合并。
 
@@ -198,33 +201,72 @@ Context: Earlier conversation summarized; recent turns kept.
 恢复检查点本身不会执行 reducer，因此此前保存的记录可能暂时超过新上限，
 第一次查询工具历史时也可能返回这份旧列表。
 
-## 工具调用观察
+## 人工审批与工具观察
 
-`agent/middleware.py` 定义同步包装函数 `wrap_tool_call(request, execute)`，
-通过 `wrap_tool_call=wrap_tool_call` 接入 `ToolNode`。每次工具请求都会自动经过它，
-包括历史查询。执行前输出工具名和调用 ID，执行后输出返回状态与耗时秒数。
-下面是示意输出，实际耗时会变化：
+删除操作默认需要人工批准。模型请求 `delete_todo` 时，`approve_tool_call()`
+先调用 `interrupt()`，工具此时尚未执行。图保存待处理工作，终端展示工具名、调用 ID 和参数：
 
 ```text
-Tool call started: name=calculate, id=calculation-1
-Tool: Calculating 2.0 add 1.0.
-Tool call finished: name=calculate, id=calculation-1, status=success, elapsed=0.001s
+Human approval required
+Tool: delete_todo
+Call ID: delete-1
+Arguments:
+{
+  "project": "Clean room",
+  "date": "2026-11-06"
+}
+Approve this call? [y/n/exit]:
 ```
 
-`request` 包含工具调用、State 与 runtime；`execute(request)` 继续执行框架提供的工具流程。
-包装函数只执行一次，并原样返回结果。它不注册为工具，也不需要提示词要求模型选择它。
-并发调用的输出可能交错，通过 ID 对应开始与结束行。
-`wrap_tool_call=wrap_tool_call` 左侧是 `ToolNode` 的构造参数名，右侧是从
-`agent/middleware.py` 导入的自定义函数。
+输入 `y`／`yes` 批准，`n`／`no` 拒绝，`exit`／`quit` 保留待审批请求并退出。
+选项忽略大小写及两端空格，空输入或未知内容会重新询问。Ctrl+C／Ctrl+D 同样退出，
+不会批准请求。重启后选择原会话，先审查已保存请求，再接受新的聊天输入。
+存在待处理工作时，应保持审批配置与任务顺序稳定。
+拒绝时返回明确说明未执行的错误 `ToolMessage`，模型据此解释结果；不会删除待办，
+也不自动结束整个图。提示词要求模型没有新的用户请求时不要重试被拒绝操作，
+这是模型行为指引，不是永久禁用工具。
 
-`success`／`error` 来自 `ToolMessage.status`，不另外判断业务是否成功。
-例如计算器返回除零错误说明时，协议状态仍可能是 `success`。
-向外抛出的异常记录为 `exception`，继续交给 `ToolNode` 原有的错误处理；
-返回的 `Command` 标记为 `command` 并原样传递。`finally` 保证抛出异常时也输出耗时。
+`console.py` 将待审批与普通失败任务区分处理：审批通过相同的 `thread_id` 和
+`Command(resume={interrupt_id: {"approved": True}})` 恢复（拒绝使用 `False`）；
+普通失败仍使用 `invoke(None, config)`。审批答案不会作为 `HumanMessage` 加入聊天，
+图暂停时也不会打印最终助手回答。多个受保护调用按请求顺序逐一审批，不支持编辑参数或批量批准。
 
-观察日志只是终端输出，不是模型消息或检查点字段。包装函数不更新 State、不重试工具，
-也不增加图节点。`call_tools()` 继续返回原有工具历史增量，并排除历史查询记录。
-图仍是三个节点、五个工具，当前终端流程使用同步调用。
+`agent/middleware.py` 通过 `tool_call_middleware()` 组合两个包装函数：
+
+```text
+工具请求 -> approve_tool_call（外层）
+              |-- 批准／无需审批
+              |      -> observe_tool_call（观察）-> execute(request)
+              |      <- 返回结果并输出耗时
+              |-- 拒绝 -> 错误 ToolMessage，不执行工具
+```
+
+`ToolNode` 接收 `wrap_tool_call=tool_call_middleware`，左侧是构造参数名，
+右侧函数把审批放在观察外层。`observe_tool_call(request, execute)` 负责观察。
+只有获准执行时才进入观察，所以计时不包含人工等待，拒绝请求没有工具执行观察日志。
+观察函数的 `finally` 输出返回协议状态或向外传播的异常；`ToolMessage.status` 不负责判断
+业务成功，例如除零说明字符串对应的协议状态仍可能是 `success`。包装函数原样透传 `Command`。
+
+`handle_tool_error()` 将审批暂停等图控制信号继续向外抛出；普通工具异常仍返回原有通用错误提示。
+中间件不注册成工具，不依赖提示词才能运行。图执行路径上的审批请求与决定由代码处理；
+直接从 Python 调用存储函数或工具对象，不经过这层中间件。
+
+### 单次工具调用的检查点
+
+`call_tools()` 按顺序执行同批请求，每次调用放进 `execute_tool()` 检查点任务（`@task`），
+保存完成后的 `ToolMessage`。恢复审批会重跑工具节点，但已完成的任务直接返回保存的结果。
+例如先保存待办、后暂停在删除审批时，重开会话批准删除，不会重新执行前面的保存。
+
+任务与中间件函数不是额外图节点，图仍只有摘要、模型、工具三个节点和五个工具。
+每个工具读取本批开始前的 State；要在查询中包含本批记录，需要在后续模型步骤查询。
+整批完成后，`call_tools()` 才返回消息与新增历史记录。暂停期间，前面工具可能已提交业务修改，
+但本批消息／历史增量还没有返回。
+
+观察日志仅输出到终端，不成为模型消息或检查点字段。已解决的拒绝请求会在 `tool_history`
+记录拒绝文本；仍待审批的请求尚无结果记录，历史查询本身继续排除。
+可恢复的审批需要 Checkpointer，终端入口已经提供原有 `SqliteSaver`，不需要迁移数据库或增加业务字段。
+工具副作用与检查点写入仍属独立事务：若业务提交后、任务结果保存前进程崩溃，仍可能重新执行。
+复用已完成任务不等于严格的恰好执行一次保证。
 
 ## SQLite 待办事项存储
 
@@ -260,6 +302,10 @@ You: exit
 
 ```text
 输入：删除2026年11月4日整理房间的待办。
+Human approval required
+Tool: delete_todo
+Arguments: {"project": "整理房间", "date": "2026-11-04"}
+Approve this call? [y/n/exit]: y
 Tool: Deleted todo: 整理房间, 2026-11-04.
 助手：……
 ```
@@ -288,7 +334,7 @@ todo_list_assistant_agent/
 │   ├── graph.py                  # 摘要、模型、工具节点
 │   ├── state.py                  # 消息、摘要和工具历史 reducer
 │   ├── tools.py                  # 时间、计算、待办和历史查询
-│   ├── middleware.py             # 单次工具状态与耗时观察
+│   ├── middleware.py             # 人工审批、观察与组合
 │   ├── model.py                  # 创建聊天模型
 │   ├── prompts.py                # 读取模板与动态组装提示词
 │   ├── summarization.py          # token 估算和摘要更新
@@ -321,7 +367,7 @@ todo_list_assistant_agent/
 `main.py` 打开 Saver，通过 `threads = checkpoints.list_threads(checkpointer)` 获取普通列表，再交给 `console.py` 的 `select_thread(threads)`。菜单不访问数据库；`agent/checkpoints.py` 集中管理 `CHECKPOINTS_FILE` 和会话查询 SQL，`console.py` 管理 `select_thread()` 和 `chat()`。入口直接进入会话列表，不解析命令行参数。
 
 `config/` 按三类职责拆分：`agent.py` 定义 `AgentConfig`，统一管理摘要参数、
-图执行步数与工具历史条数；`model.py` 定义和解析 `ModelConfig`；`app.py` 管理路径、
+图执行步数、工具历史条数与审批工具名单；`model.py` 定义和解析 `ModelConfig`；`app.py` 管理路径、
 `AppConfig`、唯一的 `read_env()` 和 `load_config()` 组装逻辑。`.env` 只提供模型配置，
 `config/agent.py` 只创建一份共享的 `AGENT_CONFIG = AgentConfig()`，
 `load_config()` 将同一个对象呈现为 `settings.agent`；图和 reducer 直接读取这份配置。
@@ -339,7 +385,9 @@ State 字段全部保留在 `AgentState` 中。
 
 两个文件都能跨重启保留，且已被 Git 忽略。最新图状态保留近期原文、有损的历史摘要，以及每个会话近期工具执行记录（默认最多十条）。想开始新对话时在启动菜单选择 `0`，同一会话一次运行一个终端进程。
 
-遇到预期的图、API 或存储错误时，程序结束本次终端会话，保留已经成功写入的检查点。重启后通过 `get_state(config).next` 判断是否有未完成步骤，先用 `invoke(None, config)` 继续，再接受新输入。已经记录完成的步骤会复用；节点中断时若尚未保存结果，可能重新执行该节点。检查点和待办写入属于独立事务，因此不保证工具副作用严格只执行一次。后续模型失败也不会回滚已提交的待办。
+遇到预期的图、API 或存储错误时，程序结束本次终端会话，保留已经成功写入的检查点。重启后通过 `get_state(config).next` 判断是否有未完成步骤；普通失败使用 `invoke(None, config)`，
+待审批请求则通过 `Command(resume=...)` 明确提供决定，再接受新输入。已经记录完成的步骤会复用；节点中断时若尚未保存结果，可能重新执行该节点。检查点和待办写入属于独立事务，因此不保证工具副作用严格只执行一次。后续模型失败也不会回滚已提交的待办。
+人工审批暂停通过明确决定恢复，不走普通失败自动恢复；重跑未完成批次时复用已完成单次任务的结果。
 
 计算器使用浮点数，适合预计耗时等日常计算，不作为精确金额计算工具。
 
@@ -358,4 +406,4 @@ token 阈值、完整轮次保留和 `RemoveMessage`。结构图、阅读顺序�
 uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests
 ```
 
-测试使用模拟模型、临时配置文件和临时数据库，不需要真实密钥或网络。覆盖配置隔离、触发阈值、滚动摘要、工具配对、摘要失败恢复、跨进程恢复、待办工具中断恢复、工具记录数量限制、只读历史查询、runtime 注入、摘要后的工具记录保留、待办增删改查、中文输入和存储，以及工具观察过程中结果、错误与 State 保持不变。
+测试使用模拟模型、临时配置文件和临时数据库，不需要真实密钥或网络。覆盖配置隔离、触发阈值、滚动摘要、工具配对、摘要失败恢复、跨进程恢复、待办工具中断恢复、工具记录数量限制、只读历史查询、runtime 注入、摘要后的工具记录保留、待办增删改查、中文输入和存储，工具观察、批准／拒绝、终端退出后续审、多次顺序审批，以及跨进程复用已完成任务。

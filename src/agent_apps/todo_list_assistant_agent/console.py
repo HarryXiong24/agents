@@ -1,12 +1,15 @@
 """Console menus, conversation input/output, and expected error messages."""
 
+import json
 import readline
 import sqlite3
+from collections.abc import Sequence
 
 from groq import APIError
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.errors import GraphRecursionError
+from langgraph.types import Command, Interrupt
 
 from .agent.summarization import SummaryError
 
@@ -49,6 +52,33 @@ def select_thread(threads: list[str]) -> str | None:
             print("Enter a listed number, 0 to create a conversation, or 'exit'.")
 
 
+def review_approvals(
+    pending: Sequence[Interrupt],
+) -> dict[str, dict[str, bool]] | None:
+    """Collect explicit decisions by interrupt ID; None leaves approvals pending."""
+    decisions: dict[str, dict[str, bool]] = {}
+    for item in pending:
+        payload = item.value
+        if not isinstance(payload, dict) or payload.get("kind") != "tool_approval":
+            raise ValueError("Unsupported pending approval request.")
+        print("------")
+        print("Human approval required")
+        print(f"Tool: {payload['tool_name']}")
+        print(f"Call ID: {payload['tool_call_id']}")
+        print("Arguments:")
+        print(json.dumps(payload["args"], ensure_ascii=False, indent=2))
+        while True:
+            choice = input("Approve this call? [y/n/exit]: ").strip().casefold()
+            if choice in {"exit", "quit"}:
+                return None
+            if choice in {"y", "yes", "n", "no"}:
+                decisions[item.id] = {"approved": choice in {"y", "yes"}}
+                break
+            print("Enter y to approve, n to reject, or exit to leave it pending.")
+        print("------")
+    return decisions
+
+
 def chat(graph, thread_id: str = "default") -> None:
     """Send new messages; the checkpointer keeps history for this conversation."""
     # Readline edits whole Unicode characters rather than individual UTF-8 bytes.
@@ -67,8 +97,20 @@ def chat(graph, thread_id: str = "default") -> None:
             # without appending a new user message or repeating completed steps.
             snapshot = graph.get_state(config)
             if snapshot.next:
-                print("Assistant: Resuming the unfinished turn.\n")
-                result = graph.invoke(None, config=config)
+                if snapshot.interrupts:
+                    # Approval is external input, not a new HumanMessage. Use the
+                    # saved interrupt ID and the same conversation's thread_id.
+                    decisions = review_approvals(snapshot.interrupts)
+                    if decisions is None:
+                        print(
+                            "Approval is still pending. Reopen this conversation to review it."
+                        )
+                        break
+                    result = graph.invoke(Command(resume=decisions), config=config)
+                else:
+                    # Ordinary failed work has no approval answer to supply.
+                    print("Assistant: Resuming the unfinished turn.\n")
+                    result = graph.invoke(None, config=config)
             else:
                 print("------")
                 text = input("You: ").strip()
@@ -97,6 +139,10 @@ def chat(graph, thread_id: str = "default") -> None:
             ):
                 # Summarization already happened in the graph; only show a notice here.
                 print("Context: Earlier conversation summarized; recent turns kept.")
+            if result.get("__interrupt__"):
+                # Report any committed summary before moving to approval review.
+                # A paused run has no final assistant answer to print yet.
+                continue
             # Always print the final reply, whether or not compaction occurred.
             print(f"Assistant: {result['messages'][-1].text}\n")
         except (EOFError, KeyboardInterrupt):
