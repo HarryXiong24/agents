@@ -1,119 +1,54 @@
-"""Build a ReAct graph with rolling summaries and recent tool execution records."""
-
-from datetime import datetime
+"""Build a ReAct graph with summaries, tool records, and an optional draft branch."""
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
-from langchain_core.messages.tool import ToolCall
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.func import task
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from ..config import agent as agent_settings
-from . import memory
 from .middleware import handle_tool_error, tool_call_middleware
-from .prompts import build_system_prompt
-from .state import AgentState, ToolCallRecord
-from .summarization import summarize_conversation
-from .tools import TOOLS, get_tool_history
+from .nodes.draft import DraftNode
+from .nodes.model import ModelNode, route_after_model
+from .nodes.summarize import SummarizeNode
+from .nodes.tools import ToolsNode, route_after_tools
+from .state import AgentState
+from .tools import TOOLS
 
 
 def build_graph(
     model: BaseChatModel,
     checkpointer: BaseCheckpointSaver | None = None,
 ):
-    """Build the loop; provide a checkpointer to resume human approval and failures."""
+    """Bind fixed dependencies once and compile a checkpoint-aware ReAct loop."""
     agent_config = agent_settings.AGENT_CONFIG
-    # Expose tool schemas to the model. Binding does not execute any tools.
-    model_with_tools = model.bind_tools(TOOLS)
-    tool_node = ToolNode(
-        TOOLS,
-        handle_tool_errors=handle_tool_error,
-        wrap_tool_call=tool_call_middleware,
+    # Node objects hold fixed resources; conversation data remains in AgentState.
+    model_node = ModelNode(model.bind_tools(TOOLS))
+    summary_node = SummarizeNode(model, agent_config)
+    draft_node = DraftNode(model)
+    tools_node = ToolsNode(
+        ToolNode(
+            TOOLS,
+            handle_tool_errors=handle_tool_error,
+            wrap_tool_call=tool_call_middleware,
+        )
     )
 
-    @task
-    def execute_tool(state: AgentState, call: ToolCall) -> ToolMessage:
-        """Checkpoint one call's result so replay can reuse completed executions."""
-        request = state["messages"][-1]
-        if not isinstance(request, AIMessage):
-            raise TypeError("The tool task requires an AIMessage.")
-        # Isolate one request while preserving the pre-batch State for runtime injection.
-        single_request = request.model_copy(update={"tool_calls": [call]})
-        tool_state = {**state, "messages": [*state["messages"][:-1], single_request]}
-        # RunnableConfig is inherited from the task's graph context, not serialized
-        # as an argument. Inputs and returned ToolMessage are checkpoint-serializable.
-        updates = tool_node.invoke(tool_state)
-        return updates["messages"][0]
-
-    # A node returns a partial state update.
-    def call_model(state: AgentState):
-        # Query SQLite before every model call, including after writes.
-        # Putting the records in the prompt makes them available to the model.
-        todos = memory.load_todos()
-        system = build_system_prompt(todos, state.get("summary", ""))
-        # Send system instructions with each request without appending to history.
-        response = model_with_tools.invoke([SystemMessage(system), *state["messages"]])
-        # MessagesState appends new message IDs and replaces matching IDs.
-        return {"messages": [response]}
-
-    def call_tools(state: AgentState):
-        """Process tool requests and return messages alongside new history records."""
-        request = state["messages"][-1]
-        if not isinstance(request, AIMessage):
-            raise TypeError("The tool node requires an AIMessage with tool calls.")
-
-        # Stable task order lets checkpoints match cached results after a restart.
-        # Wait for each call before starting the next; approvals never race for input.
-        tool_messages = [
-            execute_tool(state, call).result() for call in request.tool_calls
-        ]
-        # Match by call ID because one model reply can request several tools.
-        calls_by_id = {call["id"]: call for call in request.tool_calls}
-        records: list[ToolCallRecord] = []
-        for message in tool_messages:
-            call = calls_by_id[message.tool_call_id]
-            # Keep lookup results in messages, but avoid nesting history inside itself.
-            if call["name"] == get_tool_history.name:
-                continue
-            records.append(
-                {
-                    "tool_name": call["name"],
-                    "tool_args": dict(call["args"]),
-                    # Record the actual output, including handled error messages.
-                    "result": message.text,
-                    # This is the record creation time, with the local UTC offset.
-                    "timestamp": datetime.now().astimezone().isoformat(),
-                }
-            )
-
-        # Each field has its own reducer: messages merge by ID, history is bounded.
-        # Return only this batch; returning old history too would duplicate it.
-        return {"messages": tool_messages, "tool_history": records}
-
-    # A conditional router returns the next node's name.
-    def route_after_model(state: AgentState):
-        # Execute requested tools; otherwise this turn is complete.
-        last_message = state["messages"][-1]
-        if isinstance(last_message, AIMessage) and last_message.tool_calls:
-            return "tools"
-        return END
-
-    def summarize(state: AgentState):
-        return summarize_conversation(state, model, agent_config)
-
-    # init graph
+    # Init graph
     graph = StateGraph(AgentState)
-    graph.add_node("summarize", summarize)
-    graph.add_node("model", call_model)
-    graph.add_node("tools", call_tools)
+
+    # Nodes
+    graph.add_node("summarize", summary_node.summarize)
+    graph.add_node("model", model_node.model)
+    graph.add_node("tools", tools_node.tools)
+    graph.add_node("draft", draft_node.draft)
 
     # Check once per new user turn; never summarize inside an active tool loop.
+    # Edges
     graph.add_edge(START, "summarize")
     graph.add_edge("summarize", "model")
     graph.add_conditional_edges("model", route_after_model, ["tools", END])
-    graph.add_edge("tools", "model")
+    graph.add_conditional_edges("tools", route_after_tools, ["model", "draft"])
+    graph.add_edge("draft", END)
 
     # Restore and save state by thread_id when a checkpointer is supplied.
     # Keeping it optional lets isolated graph tests run without persistent state.

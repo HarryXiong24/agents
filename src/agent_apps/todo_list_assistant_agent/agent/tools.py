@@ -2,13 +2,15 @@
 
 import json
 import math
+from datetime import date as calendar_date
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
 
 from . import memory
+from .schemas import TodoDraftRequest
 from .state import AgentState
 
 
@@ -89,10 +91,63 @@ def delete_todo(project: str, date: str) -> str:
     return result
 
 
+@tool
+def list_todos(project: str | None = None, date: str | None = None) -> str:
+    """Read saved todos for display, optionally matching an exact name and/or date.
+
+    Use whenever the user asks to show or list saved todos. With no arguments,
+    return all saved todos. project is the exact name; date is YYYY-MM-DD.
+    Resolve relative dates with the time tool before supplying a date filter.
+    Each returned record has only project, minutes, and date; an empty list means
+    no matches. This read-only tool never saves, deletes, or generates records.
+    Use these returned records to answer the user's query; never invent saved rows.
+    """
+    if project is not None:
+        project = project.strip()
+        if not project:
+            raise ValueError("The todo name filter must not be blank.")
+    if date is not None and calendar_date.fromisoformat(date).isoformat() != date:
+        raise ValueError("The date filter must use YYYY-MM-DD format.")
+    todos = []
+    for todo in memory.load_todos():
+        if project is not None and todo["project"] != project:
+            continue
+
+        if date is not None and todo["date"] != date:
+            continue
+
+        todos.append(todo)
+
+    return json.dumps(todos, ensure_ascii=False)
+
+
+@tool(args_schema=TodoDraftRequest, response_format="content_and_artifact")
+def generate_todo_draft(
+    projects: list[str], date: str, max_minutes: int
+) -> tuple[str, dict[str, Any]]:
+    """Request an unsaved arrangement for named tasks on one date within a time budget.
+
+    Use when the user wants proposed durations or an arrangement draft, not saving.
+    Copy distinct task names, date and total time limit from the user's requirements;
+    ask if any are missing. Resolve relative dates with the time tool first.
+    max_minutes is the total budget for this draft, from 1 to 1440 minutes.
+    Call this tool alone in its batch. The graph's draft node generates and checks
+    the proposal next, then ends the turn with one displayed draft. Nothing is saved
+    to the todo database. A later explicit save request can use save_todo.
+    """
+    request = TodoDraftRequest(projects=projects, date=date, max_minutes=max_minutes)
+    if len(request.projects) > request.max_minutes:
+        raise ValueError("The budget must allow at least one minute per task.")
+    return (
+        "Draft request accepted. The draft node will generate and validate it. This request does not save any todos.",
+        request.model_dump(mode="json"),
+    )
+
+
 # The model requests this tool with {}: runtime is hidden from its input schema.
 # When the graph reaches ToolNode, it creates and injects ToolRuntime before calling
 # this function. The model and console user do not construct or supply runtime.
-# ToolRuntime[None, AgentState] describes two types: no custom context (None), and
+# ToolRuntime[None, AgentState] describes no custom context and
 # the shape of runtime.state (AgentState). These are type parameters, not call values.
 # runtime.state contains this conversation's current messages, summary, and history;
 # the graph restores saved state using thread_id before tools read it.
@@ -120,4 +175,12 @@ def get_tool_history(runtime: ToolRuntime[None, AgentState]) -> str:
 
 # All tools run locally. Both model binding and the tool node use this list.
 # Adding a tool here does not require changing the graph's edges.
-TOOLS = [get_current_time, calculate, save_todo, delete_todo, get_tool_history]
+TOOLS = [
+    get_current_time,
+    calculate,
+    save_todo,
+    delete_todo,
+    list_todos,
+    generate_todo_draft,
+    get_tool_history,
+]

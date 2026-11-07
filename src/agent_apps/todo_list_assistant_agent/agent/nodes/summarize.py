@@ -1,4 +1,4 @@
-"""Compress completed old turns while keeping recent tool exchanges intact."""
+"""Implement the summarize node, preserving recent tool exchanges during compression."""
 
 import json
 from collections.abc import Sequence
@@ -15,13 +15,25 @@ from langchain_core.messages import (
 )
 from langchain_core.messages.utils import count_tokens_approximately
 
-from ..config import AgentConfig
-from .prompts import SUMMARY_PROMPT
-from .state import AgentState
+from ...config import AgentConfig
+from ..prompts import SUMMARY_PROMPT
+from ..state import AgentState
 
 
 class SummaryError(ValueError):
     """An invalid summary must not replace the original conversation messages."""
+
+
+class SummarizeNode:
+    """Keep the base model and shared settings separate from conversation State."""
+
+    def __init__(self, model: BaseChatModel, agent_config: AgentConfig) -> None:
+        self._model = model
+        self._agent_config = agent_config
+
+    def summarize(self, state: AgentState) -> dict:
+        """Check whether older conversation turns should be compressed."""
+        return summarize_conversation(state, self._model, self._agent_config)
 
 
 def estimate_history_tokens(messages: Sequence[BaseMessage], summary: str = "") -> int:

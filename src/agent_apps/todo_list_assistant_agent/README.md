@@ -2,8 +2,8 @@
 
 English | [简体中文](README.zh-CN.md)
 
-A console-based Todo List Assistant Agent built with LangGraph. It combines five local
-tools, three graph nodes, rolling conversation summaries, SQLite checkpoints,
+A console-based Todo List Assistant Agent built with LangGraph. It combines seven local
+tools, four graph nodes, rolling conversation summaries, SQLite checkpoints,
 SQLite todo storage, and a custom State reducer retaining recent tool
 call results, including rejected requests. Each todo has exactly three fields: `project` (name), `minutes`
 (estimated duration), and `date` (scheduled date).
@@ -19,6 +19,8 @@ explicitly requested. This README describes current usage and design; the
 | `calculate` | Add, subtract, multiply, or divide numbers |
 | `save_todo` | Add a todo or update its estimated duration for the same name/date |
 | `delete_todo` | Delete the matching todo after human approval |
+| `list_todos` | Query saved todos, optionally filtered by exact name/date |
+| `generate_todo_draft` | Request an unsaved arrangement for named tasks within a date/time budget |
 | `get_tool_history` | Read the current conversation's retained recent tool executions |
 
 ## Todo fields and storage
@@ -110,19 +112,21 @@ Ask "What time is it?" to observe the time tool. It returns local time in `YYYY-
 ## Read one block at a time
 
 1. `agent/tools.py`: how `@tool`, parameter types, and descriptions expose local functions to the model.
-2. `config/` and `agent/model.py`: configuration loading and validation, followed by model creation.
+2. `config/` and `agent/model.py`: configuration followed by model creation. `agent/graph.py` assembles model wrappers and node objects once.
 3. `agent/memory.py` and `agent/prompts.py`: how todos are stored, queried, and inserted into the system prompt.
 4. `agent/middleware.py`: how `ToolNode` supplies a request and executor around each tool call.
-5. `agent/state.py` and `agent/graph.py`: how `call_tools()` returns new records and the reducer merges them. Then read `agent/summarization.py` for the summary node before the model/tool loop.
+5. `agent/state.py` and `agent/nodes/tools.py`: how `tools()` returns new records and the reducer merges them. Read `agent/nodes/model.py` and `agent/nodes/summarize.py` for model calls and summary checks, then `agent/graph.py` for assembly and routing.
 6. `agent/checkpoints.py` and `console.py`: how storage returns a list of conversation names, the menu selects one, and `chat()` sends new messages with its `thread_id`.
-7. `main()` and `__main__.py`: how the application starts and keeps `SqliteSaver` open.
+7. `agent/schemas.py` and `agent/nodes/draft.py`: structured model output, user-constraint checks, checkpointed proposals and one final reply.
+8. `main()` and `__main__.py`: how the application starts and keeps `SqliteSaver` open.
 
 The core loop is:
 
 ```text
 User input -> Summary check -> Model node
-                |-- Tool calls -> Tool node -> Model node
-                |-- Final answer -> End turn -> Wait for user input
+                |-- Ordinary tool calls -> Tool node -> Model node
+                |-- Draft request -> Tool node -> Draft node -> END
+                |-- Natural reply -> END -> End turn -> Wait for user input
 ```
 
 `bind_tools()` exposes names, parameters, and descriptions. The model returns a request; `ToolNode` actually executes it and sends tool-result messages back to the model.
@@ -135,7 +139,73 @@ Start `uv run todo-list-assistant-agent`, choose `0`, name the conversation `hom
 
 Create another conversation named `work-todos` for separate history. Startup always asks you to choose; you do not need to remember or pass an ID. Displayed numbers are temporary menu positions, while the saved conversation names remain stable.
 
-The console sends only the new `HumanMessage`. `AgentState` extends `MessagesState` with optional `summary` and `tool_history` fields. The checkpointer saves them together with recent user messages, model replies, tool requests, and tool results.
+The console sends only the new `HumanMessage`. `AgentState` extends `MessagesState` with optional `summary`, `tool_history`, and `todo_draft` fields. The checkpointer saves them together with recent user messages, model replies, tool requests, and tool results.
+
+## Todo arrangement drafts
+
+Ask, for example: "Propose durations for Python and English on 2026-11-09,
+within 90 minutes total. Show a draft without saving it."
+
+The model calls `generate_todo_draft(projects, date, max_minutes)` alone in its
+batch. This tool validates the request and returns plain constraints in an internal
+artifact. The graph routes to `DraftNode.draft`, which uses the same configured base
+model with `with_structured_output(TodoDraft, method="json_mode", include_raw=True)`.
+Only this path requests JSON; ordinary chat keeps natural replies. The provider must
+support JSON object mode. The prompt supplies the schema, and local Pydantic checks
+its fields; provider-enforced strict JSON Schema support is not required.
+
+TodoDraft contains a nonempty list of TodoView records, each with only project,
+minutes and date. Strict types, forbidden extras, nonblank names, real canonical
+dates and integer durations from 1 to 1440 are checked first. Python then checks
+that every requested task appears exactly once, every date matches the request,
+and total minutes do not exceed the requested budget. Names must be distinct and
+have no surrounding whitespace; the budget is 1–1440 minutes and must allow at
+least one minute per task. Schema/parser failures, incomplete model responses and
+business-rule failures produce an explanation with no valid draft and no todo write.
+Draft-failure messages describe only generation; earlier successful saves in the
+same turn remain committed. There is no graph-level automatic repair pass; API failures use the normal console
+handling and can resume at the draft node. Existing SDK retry settings still apply.
+
+The accepted request's constraints are separate from generated durations. The
+outer model extracts them from the conversation, so accurately identifying user
+intent remains model-dependent. The generator receives only those constraints,
+not authority to change them. This feature proposes durations for one date; it does
+not validate fixed per-task durations, multiple dates, priorities, start times or
+conflicts with saved todos. Ask for missing or unsupported requirements.
+
+Illustrative output (draft labels currently use English; task names are preserved):
+
+```text
+Assistant: Todo draft for 2026-11-09:
+- Python: 50 minutes
+- English: 30 minutes
+Total: 80 / 90 minutes.
+Not saved. Ask to save this draft if you want to keep it.
+```
+
+After validation, code formats one ordinary AIMessage and routes directly to END.
+The structured candidate is not printed separately or rephrased by another LLM.
+The console prints only the final assistant message. `list_todos` is an ordinary
+read-only JSON-text query with optional exact name/date filters; its results go to
+the model for the final answer, with no separate console renderer or replay panel.
+
+The latest valid candidate is stored as plain data in `AgentState.todo_draft` and
+checkpointed per conversation. It survives restart and summarization and is supplied
+to the next model call separately from the current saved database list. A replacement
+draft request clears the old proposal before generation; invalid replacements leave
+no active draft. The next model prompt explicitly reports the absence of an active
+draft, even if historical messages still contain an older proposal. Creating a draft
+never inserts or updates todo records. An explicit later save
+request uses `save_todo` per record; approval depends on `AgentConfig.approval_tools`
+(default: deletion only). Saves are separate transactions and can partially succeed.
+The draft remains a proposal snapshot after saving; only tool confirmations and the
+current database establish what was saved.
+
+Draft requests must run alone. A batch mixing drafting with any other tool is
+rejected in full before effects, with an error result for each call. Normal tool
+requests still use observation, optional approval and checkpointed tasks. Tool history
+records the draft-request tool result; generation/check results live in State/messages.
+Saved todos, existing messages and database locations are preserved.
 
 ## Rolling conversation summaries
 
@@ -158,12 +228,12 @@ class AgentConfig:
 For a lower summary threshold, change `summary_trigger_tokens` to `300`;
 for less frequent compression, try `6000`. `summary_keep_turns` controls how many
 completed turns remain verbatim. `recursion_limit` bounds graph steps per invocation,
-including summary/model/tool nodes; it is not a separate tool-call count.
+including summary/model/tools/draft nodes; it is not a separate tool-call count.
 `tool_history_limit` controls retained execution records per conversation.
 Set `approval_tools=()` only when you intentionally want to disable approval.
 These settings are developer-maintained defaults without runtime constructor validation.
 
-The threshold counts only the summary and conversation messages, excluding fixed system instructions, saved todos, and tool definitions. It uses LangChain's approximate character-based counter, not Groq's exact tokenizer. Four or five sufficiently detailed turns may trigger compression at 500, but very short exchanges can take longer. Lowering the threshold still cannot compress until there are older turns beyond the two retained turns.
+The threshold counts only the summary and conversation messages, excluding fixed system instructions, saved todos, the separate draft field, and tool definitions. It uses LangChain's approximate character-based counter, not Groq's exact tokenizer. Four or five sufficiently detailed turns may trigger compression at 500, but very short exchanges can take longer. Lowering the threshold still cannot compress until there are older turns beyond the two retained turns.
 
 For a quick test, create a conversation and discuss household chores, work tasks, available time, and scheduling preferences in four successive messages. Ask for reasonably detailed replies. When compression commits, the console prints the notice below, including before
 a pending tool approval:
@@ -186,7 +256,7 @@ is replaced when updated, and `tool_history` concatenates updates while retainin
 the configured number of recent entries (ten by default). Nodes return only their new values; LangGraph applies each
 field's merge rule.
 
-The `call_tools()` node also returns new `tool_history` records containing each tool's
+The `tools()` node also returns new `tool_history` records containing each tool's
 name, requested arguments, actual result text, and a timestamp with the local UTC
 offset. `add_tool_history()` merges them with previous records and retains the configured
 number of recent entries (ten by default) per conversation. These records are checkpointed, survive summary compression,
@@ -195,10 +265,10 @@ They are not automatically added to every model prompt. The read-only `get_tool_
 
 Ask "Which tools ran in this conversation? Show the arguments, results, and timestamps." The assistant should call `get_tool_history` and present retained recent executions (up to ten by default). An empty list means there are no records to show. The lookup takes no model-supplied arguments and reads the state before its tool batch; to include another tool's new execution, query in a subsequent step. There is no separate console command or automatic history panel.
 
-The graph has three nodes and five tools. Tool history uses the existing
+The graph has four nodes and seven tools. Tool history uses the existing
 checkpoint database and has no separate table; retention is configured by
 `AgentConfig.tool_history_limit`.
-`call_tools()` wraps `ToolNode` to generate the records. The graph uses
+`tools()` wraps `ToolNode` to generate the records. The graph uses
 `recursion_limit=20` by default; it has no separate per-tool execution budget.
 Tool history is generated by the node; the observation middleware below prints
 execution details to the terminal.
@@ -268,16 +338,16 @@ calls to storage functions or tool objects do not pass through this middleware.
 
 ### Checkpointed tool calls
 
-`call_tools()` processes a batch sequentially. Each call runs inside an
+`tools()` processes a batch sequentially. Each call runs inside an
 `execute_tool()` task (`@task`), whose completed `ToolMessage` is checkpointed.
 On approval resume, the tools node replays, but completed tasks return their saved
 results. For example, a save before a pending deletion does not execute again
 when you reopen the conversation and approve the deletion.
 
 The task and middleware functions are not additional graph nodes: the graph still
-has summary, model, and tools nodes, and five tools. Each tool sees the original
+has summary, model, tools, and draft nodes, and seven tools. Each tool sees the original
 pre-batch State, so query history in a later model step to include this batch.
-`call_tools()` returns messages and new history records after the whole batch
+`tools()` returns messages and new history records after the whole batch
 completes. While paused, some earlier tools may already have committed changes,
 but their batch's message/history updates have not yet been returned.
 
@@ -353,30 +423,81 @@ todo_list_assistant_agent/
 │   └── app.py                     # Paths, .env reading, and AppConfig assembly
 ├── agent/
 │   ├── __init__.py
-│   ├── graph.py                  # Summary, model, and tool nodes
-│   ├── state.py                  # Messages, summary, and tool-history reducer
+│   ├── graph.py                  # Fixed dependencies, node objects, and edges
+│   ├── state.py                  # Messages, summary, tool history, and draft
+│   ├── schemas.py                # Request and generated draft schemas
 │   ├── tools.py                  # Time, arithmetic, todos, and history lookup
 │   ├── middleware.py             # Approval, observation, and composition
 │   ├── model.py                  # Chat model creation
 │   ├── prompts.py                # Template loading and dynamic prompt formatting
-│   ├── summarization.py          # Token estimate and summary updates
 │   ├── memory.py                 # Todo validation and SQLite CRUD
 │   ├── checkpoints.py            # Checkpoint paths and conversation queries
+│   ├── nodes/                    # Graph node implementations
+│   │   ├── __init__.py
+│   │   ├── model.py              # Model invocation and conditional router
+│   │   ├── tools.py              # Sequential tasks and execution-history updates
+│   │   ├── summarize.py          # Token estimate and summary updates
+│   │   └── draft.py              # Structured generation, checks and draft reply
 │   └── prompt_templates/         # Markdown only; no __init__.py
 │       ├── system_prompt.md
 │       ├── todo_list_prompt.md
-│       └── summary_prompt.md
+│       ├── summary_prompt.md
+│       └── draft_prompt.md
 ├── data/                         # Personal SQLite files; ignored by Git
 ├── docs/                         # Bilingual learning guides
 └── tests/                        # Offline tests with temporary storage
 ```
+
+`agent/graph.py` prepares the tool-bound model and `ToolNode` once inside `build_graph(model, checkpointer=...)`. It constructs four
+small node objects and registers their bound methods. Fixed dependencies live in
+instance fields; each execution method accepts only `state`.
+
+For example, `ModelNode` receives its model in `__init__`, then `model(state)`
+uses `self._model`. Python supplies self for `model_node.model`, while LangGraph
+supplies State. There are no partials or custom Runtime.context dependency objects.
+`route_after_model()` is an ordinary router returning the next node's name.
+
+For a direct invocation (with an already-open checkpointer):
+
+```python
+graph = build_graph(model, checkpointer=checkpointer)
+result = graph.invoke(
+    {"messages": [HumanMessage(text)]},
+    config=config,
+)
+```
+
+The same compiled graph can serve separate thread IDs using its fixed dependencies.
+Node objects must not retain messages, summaries, tool history, counters, or other
+conversation data in instance fields: those belong in State. Dependencies are not
+checkpointed or exposed to the model. Restart creates a model and node objects,
+then restores saved conversation data. Approval/failure resumes use
+`graph.invoke(Command(resume=decisions), config=config)` or
+`graph.invoke(None, config=config)`; checkpoint reads use `graph.get_state(config)`.
+None of these calls requires a custom context argument.
+
+`ToolsNode.__init__` creates an `@task execute_tool` closure capturing only the
+executor. It does not decorate an instance method or pass self/model/executor as a
+task argument. Each task receives only State/call data and checkpoints its result.
+`ToolNode` still injects `ToolRuntime[None, AgentState]` for history lookup; the
+model-facing arguments remain `{}`. Runtime injection inside a tool is independent
+of how the application binds fixed node dependencies.
+
+Node module names and execution function names match the graph registration keys:
+
+| Graph name | Module | Execution function |
+|---|---|---|
+| `model` | `agent/nodes/model.py` | `ModelNode.model(state)` |
+| `tools` | `agent/nodes/tools.py` | `ToolsNode.tools(state)` |
+| `summarize` | `agent/nodes/summarize.py` | `SummarizeNode.summarize(state)` |
+| `draft` | `agent/nodes/draft.py` | `DraftNode.draft(state)` |
 
 The application uses these responsibility boundaries:
 
 | Layer | Location | Responsibility |
 |---|---|---|
 | Entry and interaction | `main.py`, `console.py` | Resource lifetime, composition, session menu, and input/output |
-| Agent execution | `agent/graph.py`, `state.py`, `tools.py`, and related modules | Graph, State, tools, model, prompts, and summarization |
+| Agent execution | `agent/graph.py`, `agent/nodes/`, `state.py`, `tools.py`, and related modules | Graph assembly, node execution, State, tools, model, and prompts |
 | Agent persistence | `agent/memory.py`, `agent/checkpoints.py` | Todo SQLite CRUD and checkpoint conversation queries |
 | Shared configuration | `config/` | Central settings loading, defaults, validation, and application data paths |
 
@@ -387,7 +508,7 @@ anchors both SQLite files, independently of module locations.
 
 Edit the relevant `.md` file under `agent/prompt_templates/` to change instructions. `agent/prompts.py` loads templates as UTF-8 and formats todo data. Templates load at import time, so restart after editing. The short tool-error instruction remains the `TOOL_ERROR_MESSAGE` string in `agent/prompts.py`.
 
-Filenames use lowercase and Python constants use uppercase; their casing does not need to match. `agent/graph.py` imports prompt helpers through `from .prompts import ...`; `main.py` imports `build_graph()` through `from .agent.graph import build_graph`.
+Filenames use lowercase and Python constants use uppercase; their casing does not need to match. Node modules import prompt helpers through `from ..prompts import ...`; `main.py` imports `build_graph()` through `from .agent.graph import build_graph`.
 
 `main.py` opens the saver, gets `threads = checkpoints.list_threads(checkpointer)`, and passes that ordinary list to `select_thread(threads)` in `console.py`. The menu does not access the database. `agent/checkpoints.py` owns `CHECKPOINTS_FILE` and the SQL used to list saved conversations; `console.py` owns `select_thread()` and `chat()`. Startup enters the conversation menu directly, without command-line argument parsing.
 
@@ -414,7 +535,7 @@ without changing the application's default file location.
 
 `data/todo_checkpoints.sqlite` stores graph state by `thread_id`, including conversation history and execution progress. `data/todos.sqlite` stores the three-field todos. Different threads have separate conversations but share the same todo list; a thread ID is not a user account.
 
-Both files survive restart and are excluded from Git. The latest graph state keeps recent original messages, a lossy historical summary, and recent tool execution records per conversation (up to ten by default). Choose `0` at startup for a fresh conversation. Run one console at a time for a given conversation.
+Both files survive restart and are excluded from Git. The latest graph state keeps recent original messages, a lossy historical summary, recent tool call records per conversation (up to ten by default), and the latest valid draft when available. Choose `0` at startup for a fresh conversation. Run one console at a time for a given conversation.
 
 Expected graph/API/storage errors end the console session and preserve whatever checkpoints were successfully saved. On restart, `get_state(config).next` detects unfinished work. Ordinary failed work
 continues with `invoke(None, config)`; saved approval interrupts require an explicit
@@ -426,9 +547,9 @@ The calculator uses floating-point arithmetic for everyday duration calculations
 
 ## Further reading
 
-Follow `call_tools()` in `agent/graph.py` to see how tool results become State updates,
+Follow `tools()` in `agent/nodes/tools.py` to see how tool results become State updates,
 then `add_tool_history()` in `agent/state.py` to see how records are merged. Read
-`agent/summarization.py` for token thresholds, complete-turn retention, and `RemoveMessage`.
+`agent/nodes/summarize.py` for token thresholds, complete-turn retention, and `RemoveMessage`.
 The [Learning Guide](docs/VERSIONS.md) provides diagrams, reading order, and exercises.
 
 ## Offline checks
@@ -439,4 +560,4 @@ From the repository root:
 uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests
 ```
 
-Tests use simulated models, temporary configuration files, and temporary databases without real API keys or network. They cover configuration isolation, threshold boundaries, rolling summaries, tool-pair preservation, failed summary recovery, cross-process restoration, pending todo tool recovery, bounded tool history, read-only history queries, runtime injection, summary preservation of tool records, todo CRUD, Unicode input and storage, per-tool observation, approval/rejection, terminal exit/restart, sequential approvals, and cross-process reuse of completed tasks.
+Tests use simulated models, temporary configuration files, and temporary databases without real API keys or network. They cover one-time dependency binding, conversation isolation across shared node objects, dependencies excluded from checkpoints, configuration isolation, threshold boundaries, rolling summaries, tool-pair preservation, failed summary recovery, cross-process restoration, pending todo tool recovery, bounded tool history, read-only history queries, runtime injection, summary preservation of tool records, todo CRUD, Unicode input and storage, per-tool observation, approval/rejection, terminal exit/restart, sequential approvals, cross-process reuse of completed tasks, request/schema validation, draft business checks, single-reply presentation, restart recovery, explicit saving, JSON-mode requests, ordinary queries, and checkpointed natural replies at END.

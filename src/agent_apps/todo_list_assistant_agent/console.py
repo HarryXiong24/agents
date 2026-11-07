@@ -11,7 +11,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.errors import GraphRecursionError
 from langgraph.types import Command, Interrupt
 
-from .agent.summarization import SummaryError
+from .agent.nodes.summarize import SummaryError
 
 
 def select_thread(threads: list[str]) -> str | None:
@@ -80,7 +80,7 @@ def review_approvals(
 
 
 def chat(graph, thread_id: str = "default") -> None:
-    """Send new messages; the checkpointer keeps history for this conversation."""
+    """Run new turns and resumes; fixed dependencies are already bound to the graph."""
     # Readline edits whole Unicode characters rather than individual UTF-8 bytes.
     # Readline history is separate from the graph's persisted conversation state.
     readline.set_auto_history(False)
@@ -121,7 +121,10 @@ def chat(graph, thread_id: str = "default") -> None:
 
                 # Send only the new message. MessagesState merges it with the
                 # history restored by the checkpointer for this thread_id.
-                result = graph.invoke({"messages": [HumanMessage(text)]}, config=config)
+                result = graph.invoke(
+                    {"messages": [HumanMessage(text)]},
+                    config=config,
+                )
 
             # Compare message IDs before and after this invocation. A new conversation
             # may have no saved messages, so the snapshot lookup defaults to [].
@@ -138,13 +141,16 @@ def chat(graph, thread_id: str = "default") -> None:
                 or old_ids - new_ids
             ):
                 # Summarization already happened in the graph; only show a notice here.
+                print("------")
                 print("Context: Earlier conversation summarized; recent turns kept.")
+                print("------")
             if result.get("__interrupt__"):
                 # Report any committed summary before moving to approval review.
                 # A paused run has no final assistant answer to print yet.
                 continue
             # Always print the final reply, whether or not compaction occurred.
             print(f"Assistant: {result['messages'][-1].text}\n")
+
         except (EOFError, KeyboardInterrupt):
             # Ctrl+D ends input; Ctrl+C interrupts input or graph execution.
             # Leave the chat loop so main() can close the saver's connection.

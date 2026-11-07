@@ -87,6 +87,7 @@ def test_graph_observes_each_call_and_preserves_history(tmp_path, monkeypatch, c
         },
     ]
     model = Mock(spec=BaseChatModel)
+
     model.bind_tools.return_value = model
     model.invoke.side_effect = [
         AIMessage(content="", tool_calls=calls),
@@ -100,7 +101,8 @@ def test_graph_observes_each_call_and_preserves_history(tmp_path, monkeypatch, c
     with SqliteSaver.from_conn_string(str(tmp_path / "checkpoints.sqlite")) as saver:
         graph = build_graph(model, saver)
         result = graph.invoke(
-            {"messages": [HumanMessage("Calculate and show history.")]}, config
+            {"messages": [HumanMessage("Calculate and show history.")]},
+            config,
         )
         history = result["tool_history"]
         assert len(history) == 3
@@ -118,6 +120,7 @@ def test_graph_observes_each_call_and_preserves_history(tmp_path, monkeypatch, c
             "summarize",
             "model",
             "tools",
+            "draft",
             "__end__",
         }
 

@@ -31,7 +31,7 @@ def add_tool_history(
 
 
 class AgentState(MessagesState):
-    """Recent messages, an optional summary, and bounded tool call records."""
+    """Recent messages, summary, bounded tool history, and the latest valid draft."""
 
     # The summary may be absent before compression; read it with state.get("summary", "").
     summary: NotRequired[str]
@@ -42,3 +42,8 @@ class AgentState(MessagesState):
     # Declaring this field does not create records; a node must produce the updates.
     # NotRequired lets graph inputs omit this field, just as they can omit summary.
     tool_history: NotRequired[Annotated[list[ToolCallRecord], add_tool_history]]
+
+    # Replace rather than append: this is a proposal, not the saved todo database.
+    # Store model_dump data instead of a model/client object in checkpoints.
+    # A new draft request clears the previous proposal before generation starts.
+    todo_draft: NotRequired[dict[str, Any] | None]

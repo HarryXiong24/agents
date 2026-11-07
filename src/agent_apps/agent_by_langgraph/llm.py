@@ -1,4 +1,9 @@
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_groq import ChatGroq
 
 from agent_apps.agent_by_langgraph.models.company import Company
@@ -23,7 +28,7 @@ def llm():
     # Demonstrate the LLM's ability to handle structured tool calls
     model = model.bind_tools([get_share_price])
 
-    messages = [HumanMessage("What is the share price of Amazon?")]
+    messages: list[BaseMessage] = [HumanMessage("What is the share price of Amazon?")]
     response = model.invoke(messages)
     print("content:", response, "tool_calls:", response.tool_calls)
     messages.append(response)
@@ -46,7 +51,7 @@ def llm():
 
 def invoke(model: ChatGroq, message: str) -> str:
     reply = model.invoke(message)
-    return reply.content
+    return reply.text
 
 
 def stream(model: ChatGroq, message: str):
@@ -55,7 +60,7 @@ def stream(model: ChatGroq, message: str):
         print(chunk.content, end="", flush=True)
 
 
-def message_to_dict(model: ChatGroq) -> dict:
+def message_to_dict(model: ChatGroq) -> None:
     messages = [
         SystemMessage("You are a terse assistant who answers in exactly five words."),
         HumanMessage("What is the capital of France?"),

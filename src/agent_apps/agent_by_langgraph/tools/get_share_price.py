@@ -1,4 +1,4 @@
-from langchain_core.tools import tool
+from langchain_core.tools import StructuredTool, tool
 
 
 @tool
@@ -22,7 +22,8 @@ if __name__ == "__main__":
 
     # .func() calls the original Python function directly, bypassing LangChain's
     # input validation, callbacks, and tracing for this tool invocation.
-    print("via original function:", get_share_price.func("AAPL"))
+    if isinstance(get_share_price, StructuredTool) and get_share_price.func is not None:
+        print("via original function:", get_share_price.func("AAPL"))
 
     # Calling get_share_price("AAPL") would raise TypeError because the decorated
     # object is a StructuredTool, not a callable Python function.

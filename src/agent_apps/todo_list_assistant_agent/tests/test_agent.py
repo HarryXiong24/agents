@@ -55,6 +55,7 @@ def make_idle_graph():
 def make_model(*responses):
     """Mock only model replies; run the real graph, routing, and tools."""
     model = Mock(spec=BaseChatModel)
+
     model.bind_tools.return_value = model
     model.invoke.side_effect = responses
     return model
@@ -116,7 +117,7 @@ def test_multistep_react():
         AIMessage(content="That is 315 minutes, or 5.25 hours."),
     )
     result = build_graph(model).invoke(
-        {"messages": [HumanMessage("How many hours is 45 minutes a day for 7 days?")]}
+        {"messages": [HumanMessage("How many hours is 45 minutes a day for 7 days?")]},
     )
     messages = result["messages"]
     assert len(messages) == 6
@@ -150,7 +151,7 @@ def test_tool_validation_error_returns_to_model():
         ),
     )
     result = build_graph(model).invoke(
-        {"messages": [HumanMessage("Please calculate this.")]}
+        {"messages": [HumanMessage("Please calculate this.")]},
     )
     tool_result = result["messages"][2]
     assert isinstance(tool_result, ToolMessage)
@@ -285,7 +286,7 @@ def test_save_tool_refreshes_prompt_and_survives_new_graph():
         AIMessage(content="Saved a 60-minute Python todo for October 29."),
     )
     build_graph(first_model).invoke(
-        {"messages": [HumanMessage("Save a 60-minute Python todo for 2026-10-29.")]}
+        {"messages": [HumanMessage("Save a 60-minute Python todo for 2026-10-29.")]},
     )
     assert memory.load_todos() == [todo]
     # The next model call in the same turn must see the newly saved todo.
@@ -298,7 +299,7 @@ def test_save_tool_refreshes_prompt_and_survives_new_graph():
         AIMessage(content="Your Python todo on October 29 is 60 minutes.")
     )
     result = build_graph(second_model).invoke(
-        {"messages": [HumanMessage("What todos do I have?")]}
+        {"messages": [HumanMessage("What todos do I have?")]},
     )
     # A new graph with no chat history still receives persisted todos in its prompt.
     assert (
@@ -331,7 +332,7 @@ def test_updated_todo_reaches_next_model_request():
                     "Update the Python todo on 2026-10-29 to 45 minutes and save it."
                 )
             ]
-        }
+        },
     )
     assert '"minutes": 30' in model.invoke.call_args_list[0].args[0][0].content
     assert '"minutes": 45' in model.invoke.call_args_list[1].args[0][0].content
@@ -362,7 +363,7 @@ def test_temporary_calculation_keeps_saved_todos():
                     "Temporarily use 20 minutes per day. How much is three days?"
                 )
             ]
-        }
+        },
     )
     assert result["messages"][2].content == "60.0"
     assert memory.load_todos() == [saved]
@@ -387,7 +388,7 @@ def test_failed_save_does_not_report_success(monkeypatch, capsys):
         AIMessage(content="Saving failed. Please try again later."),
     )
     result = build_graph(model).invoke(
-        {"messages": [HumanMessage("Save a 30-minute Python todo for 2026-10-29.")]}
+        {"messages": [HumanMessage("Save a 30-minute Python todo for 2026-10-29.")]},
     )
     assert result["messages"][2].status == "error"
     assert "Saved" not in capsys.readouterr().out
@@ -410,7 +411,7 @@ def test_one_batch_can_save_multiple_todos():
         AIMessage(content="Saved two todos."),
     )
     result = build_graph(model).invoke(
-        {"messages": [HumanMessage("Please save both todos.")]}
+        {"messages": [HumanMessage("Please save both todos.")]},
     )
     assert sorted(memory.load_todos(), key=lambda todo: todo["project"]) == sorted(
         todos, key=lambda todo: todo["project"]
@@ -446,10 +447,12 @@ def test_delete_tool_refreshes_prompt_and_survives_new_graph(checkpointer):
     graph = build_graph(model, checkpointer)
     config: RunnableConfig = {"configurable": {"thread_id": "approved-delete"}}
     paused = graph.invoke(
-        {"messages": [HumanMessage("Delete the Python todo for 2026-10-29.")]}, config
+        {"messages": [HumanMessage("Delete the Python todo for 2026-10-29.")]},
+        config,
     )
     result = graph.invoke(
-        Command(resume={paused["__interrupt__"][0].id: {"approved": True}}), config
+        Command(resume={paused["__interrupt__"][0].id: {"approved": True}}),
+        config,
     )
     assert "Deleted todo" in result["messages"][2].content
     assert memory.load_todos() == [remaining]
@@ -458,7 +461,9 @@ def test_delete_tool_refreshes_prompt_and_survives_new_graph(checkpointer):
 
     # A fresh graph sees only the todos remaining after deletion.
     restarted_model = make_model(AIMessage(content="Only the English todo remains."))
-    build_graph(restarted_model).invoke({"messages": [HumanMessage("List my todos.")]})
+    build_graph(restarted_model).invoke(
+        {"messages": [HumanMessage("List my todos.")]},
+    )
     assert expected in restarted_model.invoke.call_args.args[0][0].content
 
 
@@ -502,7 +507,8 @@ def test_delete_errors_do_not_report_success(
     config: RunnableConfig = {"configurable": {"thread_id": "failed-delete"}}
     paused = graph.invoke({"messages": [HumanMessage("Delete this todo.")]}, config)
     result = graph.invoke(
-        Command(resume={paused["__interrupt__"][0].id: {"approved": True}}), config
+        Command(resume={paused["__interrupt__"][0].id: {"approved": True}}),
+        config,
     )
     assert result["messages"][2].status == "error"
     assert "Deleted" not in capsys.readouterr().out

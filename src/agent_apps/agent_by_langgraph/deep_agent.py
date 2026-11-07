@@ -2,6 +2,8 @@ from pathlib import Path
 
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
+from langchain.agents.middleware import InputAgentState
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 
 from .tools.search import search
@@ -27,8 +29,8 @@ def deep_agent():
         backend=FilesystemBackend(root_dir=str(sandbox), virtual_mode=True),
     )
 
-    config = {"configurable": {"thread_id": "deep-agent"}}
-    inputs = {
+    config: RunnableConfig = {"configurable": {"thread_id": "deep-agent"}}
+    inputs: InputAgentState = {
         "messages": [
             {
                 "role": "user",

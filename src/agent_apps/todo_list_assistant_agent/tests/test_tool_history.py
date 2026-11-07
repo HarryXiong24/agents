@@ -8,6 +8,7 @@ import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.errors import GraphRecursionError
 
@@ -25,6 +26,7 @@ def isolate_storage(tmp_path, monkeypatch):
 
 def make_model(*responses):
     model = Mock(spec=BaseChatModel)
+
     model.bind_tools.return_value = model
     model.invoke.side_effect = responses
     return model
@@ -55,7 +57,7 @@ def test_shared_history_limit_is_used_and_persisted(tmp_path):
         assert [record["tool_args"]["a"] for record in result["tool_history"]] == [3, 4]
         assert graph.get_state(config).values["tool_history"] == result["tool_history"]
     with SqliteSaver.from_conn_string(database) as saver:
-        restored = build_graph(make_model(), saver)
+        restored = build_graph(model, saver)
         assert len(restored.get_state(config).values["tool_history"]) == 2
 
 
@@ -66,13 +68,17 @@ def test_shared_history_limit_is_used_and_persisted(tmp_path):
 def test_graph_uses_configured_recursion_limit_with_thread_config(tmp_path):
     request = AIMessage(content="", tool_calls=[calculator_request(1)])
     model = Mock(spec=BaseChatModel)
+
     model.bind_tools.return_value = model
     model.invoke.return_value = request
     config: RunnableConfig = {"configurable": {"thread_id": "loop"}}
     with SqliteSaver.from_conn_string(str(tmp_path / "loop.sqlite")) as saver:
         graph = build_graph(model, saver)
         with pytest.raises(GraphRecursionError):
-            graph.invoke({"messages": [HumanMessage("Keep calculating.")]}, config)
+            graph.invoke(
+                {"messages": [HumanMessage("Keep calculating.")]},
+                config,
+            )
         # summary -> model -> tools exhausts three steps before a second model call.
         assert model.invoke.call_count == 1
         assert len(graph.get_state(config).values["tool_history"]) == 1
@@ -86,12 +92,13 @@ def history_request(call_id: str):
 
 
 def test_history_lookup_injects_runtime_and_returns_empty_history():
-    assert get_tool_history.args == {}
+    schema = convert_to_openai_tool(get_tool_history)["function"]["parameters"]
+    assert schema["properties"] == {}
     model = make_model(
         history_request("empty-history"), AIMessage(content="No history.")
     )
     result = build_graph(model).invoke(
-        {"messages": [HumanMessage("Show tool history.")]}
+        {"messages": [HumanMessage("Show tool history.")]},
     )
     output = result["messages"][-2]
     assert isinstance(output, ToolMessage)
@@ -215,6 +222,7 @@ def test_history_survives_restart_without_repeating_completed_tools(tmp_path):
 )
 def test_summary_compression_preserves_tool_history(tmp_path):
     model = Mock(spec=BaseChatModel)
+
     bound = Mock()
     model.bind_tools.return_value = bound
     model.invoke.return_value = AIMessage(content="The user requested a calculation.")
@@ -226,7 +234,8 @@ def test_summary_compression_preserves_tool_history(tmp_path):
     with SqliteSaver.from_conn_string(str(tmp_path / "checkpoints.sqlite")) as saver:
         graph = build_graph(model, saver)
         first = graph.invoke(
-            {"messages": [HumanMessage("Please calculate this value. " * 30)]}, config
+            {"messages": [HumanMessage("Please calculate this value. " * 30)]},
+            config,
         )
         result = first
         for number in range(3):
@@ -281,7 +290,8 @@ def test_history_lookup_restores_records_and_keeps_them_unchanged(tmp_path):
         graph = build_graph(model, saver)
         for _ in range(2):
             queried = graph.invoke(
-                {"messages": [HumanMessage("Show tool history.")]}, config
+                {"messages": [HumanMessage("Show tool history.")]},
+                config,
             )
             assert json.loads(queried["messages"][-2].text) == history
             assert queried["tool_history"] == history
@@ -320,7 +330,8 @@ def test_history_lookup_uses_state_before_other_tools_in_the_same_batch(tmp_path
         assert len(first["tool_history"]) == 1
         assert first["tool_history"][0]["tool_name"] == "calculate"
         queried = graph.invoke(
-            {"messages": [HumanMessage("Show updated history.")]}, config
+            {"messages": [HumanMessage("Show updated history.")]},
+            config,
         )
         assert json.loads(queried["messages"][-2].text) == first["tool_history"]
         assert queried["tool_history"] == first["tool_history"]

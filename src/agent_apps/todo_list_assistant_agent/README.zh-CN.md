@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-这是基于 LangGraph 的终端待办助手，包含五个本地工具、三个图节点、滚动对话摘要、
+这是基于 LangGraph 的终端待办助手，包含七个本地工具、四个图节点、滚动对话摘要、
 SQLite 会话检查点、待办数据库，以及通过自定义 State reducer 保留的近期工具执行记录（默认十条）。
 每条待办仅使用 `project`（名称）、`minutes`（预计耗时）、`date`（安排日期）三个字段。
 
@@ -15,6 +15,8 @@ SQLite 会话检查点、待办数据库，以及通过自定义 State reducer �
 | `calculate` | 加、减、乘、除运算 |
 | `save_todo` | 新增待办，或更新同名同日期待办的预计耗时 |
 | `delete_todo` | 人工批准后，按名称和安排日期删除指定待办 |
+| `list_todos` | 查询待办，可按精确名称／日期筛选 |
+| `generate_todo_draft` | 为指定任务、日期和总时长预算请求一份未保存草案 |
 | `get_tool_history` | 读取当前会话保留的近期工具执行 |
 
 ## 待办字段与存储
@@ -108,19 +110,21 @@ Assistant: That is 315 minutes, or 5.25 hours.
 ## 按积木阅读
 
 1. 读 `agent/tools.py`：普通函数怎样通过 `@tool` 变成工具；参数和说明怎样帮助模型选择工具。
-2. 读 `config/` 和 `agent/model.py`：前者负责配置读取、解析和校验，后者负责模型创建。
+2. 读 `config/` 和 `agent/model.py`：配置与模型创建；再看 `agent/graph.py` 怎样一次性组装模型包装器与节点对象。
 3. 读 `agent/memory.py` 和 `agent/prompts.py`：待办事项怎样写入数据库、查询，再进入系统提示词。
 4. 读 `agent/middleware.py`：理解 `ToolNode` 怎样在每次工具调用周围传入请求与执行器。
-5. 读 `agent/state.py` 和 `agent/graph.py`：`call_tools()` 怎样返回新增记录，reducer 怎样合并；再看 `agent/summarization.py` 中的摘要节点。
+5. 读 `agent/state.py` 和 `agent/nodes/tools.py`：`tools()` 怎样返回新增记录，reducer 怎样合并；再读 `agent/nodes/model.py`、`agent/nodes/summarize.py` 的模型调用与摘要检查，最后看 `agent/graph.py` 的组装和路由。
 6. 读 `agent/checkpoints.py` 和 `console.py`：存储层怎样返回会话名称列表，菜单怎样选择，以及 `chat()` 怎样将新消息和对应的 `thread_id` 交给图。
-7. 最后看 `main()` 和 `__main__.py`：启动过程以及 `SqliteSaver` 的连接生命周期。
+7. 读 `agent/schemas.py` 和 `agent/nodes/draft.py`：模型结构化输出、请求约束检查、草案持久化和单条最终回复。
+8. 最后看 `main()` 和 `__main__.py`：启动过程以及 `SqliteSaver` 的连接生命周期。
 
-核心流程只有一条循环：
+核心流程如下：
 
 ```text
 用户输入 → 摘要检查 → 模型节点
-             ├─ 提出工具调用 → 工具节点 → 回到模型节点
-             └─ 给出回答 → 本轮结束 → 等待下一次输入
+             ├─ 普通工具调用 → 工具节点 → 回到模型节点
+             ├─ 草案请求 → 工具节点 → 草案节点 → END
+             └─ 自然文本回复 → END → 本轮结束 → 等待下一次输入
 ```
 
 `bind_tools()` 让模型知道工具的名称、参数和用途；模型返回的是调用请求，真正执行工具的是 `ToolNode`。工具结果以消息形式返回给模型，用于继续判断。
@@ -133,7 +137,60 @@ Assistant: That is 315 minutes, or 5.25 hours.
 
 新建 `work-todos` 会使用另一段独立的历史。每次启动都由菜单选择，不需要记住或传入 ID。编号只是本次菜单的位置，会话名称才是数据库中稳定的标识。
 
-终端每轮只传入新的 `HumanMessage`。`AgentState` 在 `MessagesState` 基础上声明可选的 `summary` 和 `tool_history` 字段，Checkpointer 将它们与近期用户消息、模型回复、工具请求和工具结果一起保存。
+终端每轮只传入新的 `HumanMessage`。`AgentState` 在 `MessagesState` 基础上声明可选的 `summary`、`tool_history` 和 `todo_draft` 字段，Checkpointer 将它们与近期用户消息、模型回复、工具请求和工具结果一起保存。
+
+## 生成待办安排草案
+
+例如输入："Propose durations for Python and English on 2026-11-09,
+within 90 minutes total. Show a draft without saving it."
+
+模型单独调用 `generate_todo_draft(projects, date, max_minutes)`。工具校验请求，
+用内部 artifact 返回普通约束数据；图转到 `DraftNode.draft`，使用同一个配置好的基础模型，
+调用 `with_structured_output(TodoDraft, method="json_mode", include_raw=True)`。
+只有草案分支请求 JSON，普通聊天保持自然回复。供应商需要支持 JSON object mode；
+提示词提供 schema，Pydantic 在本地校验字段，不要求供应商强制执行严格 JSON Schema。
+
+TodoDraft 包含非空的 TodoView 列表，每条仍只有 project、minutes、date。
+先检查严格类型、额外字段、非空名称、真实规范日期，以及 1～1440 的整数分钟数；
+再由 Python 检查指定任务是否各出现一次、日期是否一致、总分钟数是否超过请求预算。
+名称必须唯一且没有首尾空格，预算为 1～1440 分钟，至少给每个任务留出一分钟。
+结构／解析失败、模型回复不完整或业务规则不通过时，只说明失败，不保留有效草案，也不写入待办。
+草案失败文案只描述生成步骤，同一轮之前已成功保存的待办继续保留。
+图中没有自动修正重试步骤；API 错误沿用终端错误处理，可恢复到草案节点。
+模型 SDK 已有的网络重试设置仍然生效。
+
+已接受请求的约束与模型生成的时长分开保存。外层模型从对话提取约束，能否准确理解
+用户要求仍依赖模型；生成模型只接收这些约束，无权修改检查标准。
+当前只为单个日期的任务建议时长，不校验固定的逐项时长、多日期、优先级、开始时间，
+也不检测与已保存待办的冲突；缺少或超出支持范围的要求应先澄清。
+
+以下是示意输出，草案固定标签目前使用英文，任务名称原样保留：
+
+```text
+Assistant: Todo draft for 2026-11-09:
+- Python: 50 minutes
+- English: 30 minutes
+Total: 80 / 90 minutes.
+Not saved. Ask to save this draft if you want to keep it.
+```
+
+校验通过后，代码格式化一条普通 AIMessage，直接进入 END，不单独打印内部结构化数据，
+也不再调用另一个 LLM 复述。终端只打印最终助手消息。
+`list_todos` 是普通只读 JSON 文本查询，可按精确名称／日期筛选；结果交给模型组织最终回答，
+终端没有额外的列表展示器或查询结果重放面板。
+
+最新有效草案以普通数据保存在会话的 `AgentState.todo_draft`，随检查点持久化，
+重启和摘要后仍可用，并与当前已保存待办分别提供给下一次模型调用。
+新的草案请求会在生成前清空旧候选，替换失败不保留可用旧草案；
+后续模型提示词会明确说明当前没有有效草案，即使历史消息中仍保留旧候选。
+生成草案不会新增或修改待办记录；用户之后明确要求保存时，逐条调用 `save_todo`。
+是否暂停审批由 `AgentConfig.approval_tools` 决定，默认只有删除需要审批。
+每条保存是独立事务，可能部分成功。保存后草案仍是建议快照，实际保存情况以工具确认和当前数据库为准。
+
+草案请求必须单独调用；与其他工具混在同一批时，整批在副作用发生前拒绝，
+每个调用都有对应错误结果。普通工具仍使用观察、可配置审批和检查点任务。
+工具历史记录的是草案请求工具的结果，生成／检查结果位于 State 和消息中。
+既有待办、聊天消息和数据路径保留。
 
 ## 滚动对话摘要
 
@@ -155,11 +212,11 @@ class AgentConfig:
 
 降低摘要触发阈值可将 `summary_trigger_tokens` 改成 `300`，减少触发频率可改为 `6000`。
 `summary_keep_turns` 控制保留原文的完整轮数；`recursion_limit` 限制每次图调用的执行步数，
-包含摘要、模型和工具节点，不等于工具调用次数限制；`tool_history_limit` 控制每个会话
+包含摘要、模型、工具和草案节点，不等于工具调用次数限制；`tool_history_limit` 控制每个会话
 保留的工具执行记录条数。只有明确希望关闭审批时才将 `approval_tools` 设为 `()`。
 这些参数由开发者维护，不在构造配置对象时进行运行时校验。
 
-阈值只统计摘要和对话消息，不含固定系统指令、待办事项和工具定义。使用 LangChain 基于字符的 token 估算，不是 Groq 模型精确的 tokenizer。500 适合在约 4～5 轮较详细的交流后观察，但很短的问答可能需要更多轮。即使降低阈值，也必须有超出最近两轮之外的旧对话才能压缩。
+阈值只统计摘要和对话消息，不含固定系统指令、待办事项、独立草案字段和工具定义。使用 LangChain 基于字符的 token 估算，不是 Groq 模型精确的 tokenizer。500 适合在约 4～5 轮较详细的交流后观察，但很短的问答可能需要更多轮。即使降低阈值，也必须有超出最近两轮之外的旧对话才能压缩。
 
 快速体验时，新建会话，依次讨论家务、工作事项、可用时间和安排偏好，请助手适当展开回答。压缩成功保存后会显示下面的提示，包括本轮随后暂停审批的情况：
 
@@ -179,7 +236,7 @@ Context: Earlier conversation summarized; recent turns kept.
 `add_tool_history(old, new)` reducer。`messages` 按消息 ID 合并，`summary` 在更新时覆盖，
 `tool_history` 将新旧记录拼接后保留最近十条。节点只返回本次更新，LangGraph 按字段规则合并。
 
-`call_tools()` 工具节点还返回本次新增的 `tool_history` 记录，包含工具名称、请求参数、
+`tools()` 工具节点还返回本次新增的 `tool_history` 记录，包含工具名称、请求参数、
 实际结果文本，以及带本地 UTC 偏移的时间戳。`add_tool_history()` 将新旧记录合并，
 每个会话保留配置指定的最近记录，默认十条。记录随检查点保存，摘要压缩后仍保留，可通过
 `graph.get_state(config).values.get("tool_history", [])` 查看。
@@ -192,9 +249,9 @@ Context: Earlier conversation summarized; recent turns kept.
 读取的是本批工具执行前的状态；要包含另一工具的新执行，需要在后续步骤查询。
 没有新增独立的终端命令或自动展示面板。
 
-图为三个节点、五个工具。工具历史使用已有检查点数据库，没有独立的表；
+图为四个节点、七个工具。工具历史使用已有检查点数据库，没有独立的表；
 保留条数由 `AgentConfig.tool_history_limit` 配置，默认十条；
-`call_tools()` 包装 `ToolNode` 来生成记录。图的 `recursion_limit` 默认是 `20`，
+`tools()` 包装 `ToolNode` 来生成记录。图的 `recursion_limit` 默认是 `20`，
 没有独立的工具调用次数预算。工具历史由节点生成；下面的观察中间件负责向终端输出执行信息。
 
 调小 `tool_history_limit` 后，新上限在下一次工具节点更新合并时生效。
@@ -253,13 +310,13 @@ Approve this call? [y/n/exit]:
 
 ### 单次工具调用的检查点
 
-`call_tools()` 按顺序执行同批请求，每次调用放进 `execute_tool()` 检查点任务（`@task`），
+`tools()` 按顺序执行同批请求，每次调用放进 `execute_tool()` 检查点任务（`@task`），
 保存完成后的 `ToolMessage`。恢复审批会重跑工具节点，但已完成的任务直接返回保存的结果。
 例如先保存待办、后暂停在删除审批时，重开会话批准删除，不会重新执行前面的保存。
 
-任务与中间件函数不是额外图节点，图仍只有摘要、模型、工具三个节点和五个工具。
+任务与中间件函数不是额外图节点，图包含摘要、模型、工具、草案四个节点和七个工具。
 每个工具读取本批开始前的 State；要在查询中包含本批记录，需要在后续模型步骤查询。
-整批完成后，`call_tools()` 才返回消息与新增历史记录。暂停期间，前面工具可能已提交业务修改，
+整批完成后，`tools()` 才返回消息与新增历史记录。暂停期间，前面工具可能已提交业务修改，
 但本批消息／历史增量还没有返回。
 
 观察日志仅输出到终端，不成为模型消息或检查点字段。已解决的拒绝请求会在 `tool_history`
@@ -331,19 +388,26 @@ todo_list_assistant_agent/
 │   └── app.py                     # 路径、.env 读取与 AppConfig 组装
 ├── agent/
 │   ├── __init__.py
-│   ├── graph.py                  # 摘要、模型、工具节点
-│   ├── state.py                  # 消息、摘要和工具历史 reducer
+│   ├── graph.py                  # 固定依赖、节点对象与流程连线
+│   ├── state.py                  # 消息、摘要、工具历史和草案
+│   ├── schemas.py                # 请求与生成草案的 schema
 │   ├── tools.py                  # 时间、计算、待办和历史查询
 │   ├── middleware.py             # 人工审批、观察与组合
 │   ├── model.py                  # 创建聊天模型
 │   ├── prompts.py                # 读取模板与动态组装提示词
-│   ├── summarization.py          # token 估算和摘要更新
 │   ├── memory.py                 # 待办校验与 SQLite 增删改查
 │   ├── checkpoints.py            # 检查点路径与会话查询
+│   ├── nodes/                    # 图节点的执行逻辑
+│   │   ├── __init__.py
+│   │   ├── model.py              # 模型调用与条件路由
+│   │   ├── tools.py              # 顺序任务和执行历史更新
+│   │   ├── summarize.py          # token 估算和摘要更新
+│   │   └── draft.py              # 结构化生成、校验与草案回复
 │   └── prompt_templates/         # 只放 Markdown，不放 __init__.py
 │       ├── system_prompt.md
 │       ├── todo_list_prompt.md
-│       └── summary_prompt.md
+│       ├── summary_prompt.md
+│       └── draft_prompt.md
 ├── data/                         # 个人 SQLite 文件，不提交 Git
 ├── docs/                         # 中英文学习文档
 └── tests/                        # 使用临时存储的离线测试
@@ -351,10 +415,50 @@ todo_list_assistant_agent/
 
 应用按下面的职责边界分层：
 
+`agent/graph.py` 在 `build_graph(model, checkpointer=...)` 中一次性准备工具绑定模型与 `ToolNode`，创建四个小型节点对象并注册绑定方法。
+固定依赖保存在实例字段中，每个执行方法只接收 `state`。
+
+例如 `ModelNode` 在 `__init__` 接收模型，`model(state)` 使用 `self._model`。
+对 `model_node.model`，Python 自动提供 self，LangGraph 提供 State。
+不使用 partial 或自定义 Runtime.context 依赖对象。
+`route_after_model()` 仍是返回下一节点名的普通路由函数。
+
+直接调用示例（假设 Checkpointer 已打开）：
+
+```python
+graph = build_graph(model, checkpointer=checkpointer)
+result = graph.invoke(
+    {"messages": [HumanMessage(text)]},
+    config=config,
+)
+```
+
+同一张编译后的图可用固定依赖服务不同 thread_id。节点实例字段不保存消息、摘要、
+工具历史、计数等会话数据，这些仍属于 State。依赖不写入检查点，也不暴露给模型。
+重启时重新创建模型和节点对象，再恢复已有会话数据。
+审批／失败恢复分别使用 `graph.invoke(Command(resume=decisions), config=config)`、
+`graph.invoke(None, config=config)`；只读检查点使用 `graph.get_state(config)`。
+这些调用都不需要自定义 context 参数。
+
+`ToolsNode.__init__` 创建 `@task execute_tool` 闭包，只捕获执行器。
+不直接装饰实例方法，也不把 self／模型／执行器作为任务参数。
+每个任务仍只接收 State／调用数据，并保存自己的结果。
+`ToolNode` 仍为历史查询注入 `ToolRuntime[None, AgentState]`，模型可见参数仍是 `{}`。
+工具内的 Runtime 注入与应用怎样绑定固定节点依赖是两个独立机制。
+
+节点模块名、执行函数名与图中的注册名一一对应：
+
+| 图注册名 | 模块 | 执行函数 |
+|---|---|---|
+| `model` | `agent/nodes/model.py` | `ModelNode.model(state)` |
+| `tools` | `agent/nodes/tools.py` | `ToolsNode.tools(state)` |
+| `summarize` | `agent/nodes/summarize.py` | `SummarizeNode.summarize(state)` |
+| `draft` | `agent/nodes/draft.py` | `DraftNode.draft(state)` |
+
 | 层次 | 位置 | 职责 |
 |---|---|---|
 | 入口与交互 | `main.py`、`console.py` | 资源生命周期、组装、会话菜单和输入输出 |
-| Agent 执行 | `agent/graph.py`、`state.py`、`tools.py` 等 | 图、State、工具、模型、提示词和摘要 |
+| Agent 执行 | `agent/graph.py`、`agent/nodes/`、`state.py`、`tools.py` 等 | 图组装、节点执行、State、工具、模型与提示词 |
 | Agent 持久化 | `agent/memory.py`、`agent/checkpoints.py` | 待办 SQLite 增删改查、检查点会话查询 |
 | 共享配置 | `config/` | 统一加载设置、默认值、校验和应用数据路径 |
 
@@ -362,7 +466,7 @@ todo_list_assistant_agent/
 持久化模块依赖配置，不依赖终端交互。`.env` 与 `data/` 留在应用根目录，
 `config.DATA_DIR` 固定两个 SQLite 文件的位置，不随模块移动而改变。
 
-修改助手行为时编辑 `agent/prompt_templates/` 中对应 `.md` 文件；`agent/prompts.py` 使用 UTF-8 读取它们，再将待办数据填入模板。模板在模块导入时读取，编辑后重新启动程序生效。简短的工具错误提示保留为 `agent/prompts.py` 中的 `TOOL_ERROR_MESSAGE` 字符串。文件名使用小写，Python 常量名使用大写，二者没有必须一致的要求。`agent/graph.py` 通过 `from .prompts import ...` 使用统一入口，`main.py` 通过 `from .agent.graph import build_graph` 导入图构建函数。
+修改助手行为时编辑 `agent/prompt_templates/` 中对应 `.md` 文件；`agent/prompts.py` 使用 UTF-8 读取它们，再将待办数据填入模板。模板在模块导入时读取，编辑后重新启动程序生效。简短的工具错误提示保留为 `agent/prompts.py` 中的 `TOOL_ERROR_MESSAGE` 字符串。文件名使用小写，Python 常量名使用大写，二者没有必须一致的要求。节点模块通过 `from ..prompts import ...` 使用统一入口，`main.py` 通过 `from .agent.graph import build_graph` 导入图构建函数。
 
 `main.py` 打开 Saver，通过 `threads = checkpoints.list_threads(checkpointer)` 获取普通列表，再交给 `console.py` 的 `select_thread(threads)`。菜单不访问数据库；`agent/checkpoints.py` 集中管理 `CHECKPOINTS_FILE` 和会话查询 SQL，`console.py` 管理 `select_thread()` 和 `chat()`。入口直接进入会话列表，不解析命令行参数。
 
@@ -383,7 +487,7 @@ State 字段全部保留在 `AgentState` 中。
 
 `data/todo_checkpoints.sqlite` 按 `thread_id` 保存图状态，包括对话历史和执行进度。`data/todos.sqlite` 保存三字段待办事项。不同会话的聊天历史独立，但共用同一份待办事项；会话 ID 不是用户账号。
 
-两个文件都能跨重启保留，且已被 Git 忽略。最新图状态保留近期原文、有损的历史摘要，以及每个会话近期工具执行记录（默认最多十条）。想开始新对话时在启动菜单选择 `0`，同一会话一次运行一个终端进程。
+两个文件都能跨重启保留，且已被 Git 忽略。最新图状态保留近期原文、有损的历史摘要，每个会话近期工具调用记录（默认最多十条），以及可用时的最新待办草案。想开始新对话时在启动菜单选择 `0`，同一会话一次运行一个终端进程。
 
 遇到预期的图、API 或存储错误时，程序结束本次终端会话，保留已经成功写入的检查点。重启后通过 `get_state(config).next` 判断是否有未完成步骤；普通失败使用 `invoke(None, config)`，
 待审批请求则通过 `Command(resume=...)` 明确提供决定，再接受新输入。已经记录完成的步骤会复用；节点中断时若尚未保存结果，可能重新执行该节点。检查点和待办写入属于独立事务，因此不保证工具副作用严格只执行一次。后续模型失败也不会回滚已提交的待办。
@@ -393,8 +497,8 @@ State 字段全部保留在 `AgentState` 中。
 
 ## 延伸阅读
 
-先跟随 `agent/graph.py` 中的 `call_tools()` 查看工具结果怎样成为 State 更新，再读
-`agent/state.py` 中的 `add_tool_history()`，理解记录合并规则。`agent/summarization.py` 说明
+先跟随 `agent/nodes/tools.py` 中的 `tools()` 查看工具结果怎样成为 State 更新，再读
+`agent/state.py` 中的 `add_tool_history()`，理解记录合并规则。`agent/nodes/summarize.py` 说明
 token 阈值、完整轮次保留和 `RemoveMessage`。结构图、阅读顺序与练习见
 [学习路线](docs/VERSIONS.zh-CN.md)。
 
@@ -406,4 +510,4 @@ token 阈值、完整轮次保留和 `RemoveMessage`。结构图、阅读顺序�
 uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests
 ```
 
-测试使用模拟模型、临时配置文件和临时数据库，不需要真实密钥或网络。覆盖配置隔离、触发阈值、滚动摘要、工具配对、摘要失败恢复、跨进程恢复、待办工具中断恢复、工具记录数量限制、只读历史查询、runtime 注入、摘要后的工具记录保留、待办增删改查、中文输入和存储，工具观察、批准／拒绝、终端退出后续审、多次顺序审批，以及跨进程复用已完成任务。
+测试使用模拟模型、临时配置文件和临时数据库，不需要真实密钥或网络。覆盖依赖一次性绑定、共享节点对象下的会话隔离、依赖不写入检查点、配置隔离、触发阈值、滚动摘要、工具配对、摘要失败恢复、跨进程恢复、待办工具中断恢复、工具记录数量限制、只读历史查询、runtime 注入、摘要后的工具记录保留、待办增删改查、中文输入和存储，工具观察、批准／拒绝、终端退出后续审、多次顺序审批，跨进程复用已完成任务、请求／schema 校验、草案业务检查、单次回复、重启恢复、明确保存、JSON mode 请求、普通查询与自然回复持久化。

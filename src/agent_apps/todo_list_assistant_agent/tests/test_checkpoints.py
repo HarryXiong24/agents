@@ -32,6 +32,7 @@ def isolate_storage(tmp_path, monkeypatch):
 
 def make_model(*responses):
     model = Mock(spec=BaseChatModel)
+
     model.bind_tools.return_value = model
     model.invoke.side_effect = responses
     return model
@@ -51,6 +52,7 @@ from agent_apps.todo_list_assistant_agent.agent.graph import build_graph
 
 memory.DATABASE_FILE = Path(sys.argv[1]) / "todos.sqlite"
 model = Mock(spec=BaseChatModel)
+
 model.bind_tools.return_value = model
 if sys.argv[2] == "write":
     model.invoke.side_effect = [
@@ -69,8 +71,7 @@ with SqliteSaver.from_conn_string(str(Path(sys.argv[1]) / "todo_checkpoints.sqli
     graph = build_graph(model, checkpointer=saver)
     result = graph.invoke(
         {"messages": [HumanMessage(text)]},
-        config={"configurable": {"thread_id": sys.argv[3]}},
-    )
+        config={"configurable": {"thread_id": sys.argv[3]}})
     print(json.dumps([{"type": m.type, "content": m.content} for m in result["messages"]]))
 """
 
@@ -143,7 +144,10 @@ def test_restart_after_model_failure_does_not_repeat_completed_save(
     with SqliteSaver.from_conn_string(database) as saver:
         graph = build_graph(first, checkpointer=saver)
         with pytest.raises(APIConnectionError):
-            graph.invoke({"messages": [HumanMessage("Save my todo")]}, config=config)
+            graph.invoke(
+                {"messages": [HumanMessage("Save my todo")]},
+                config=config,
+            )
         assert graph.get_state(config).next == ("model",)
     assert save.call_count == 1
 
@@ -182,7 +186,7 @@ def test_main_opens_saver_for_chat_then_closes_it(monkeypatch):
     ]
     # Reopening the file after both exits must still recover the finished state.
     with SqliteSaver.from_conn_string(str(checkpoints.CHECKPOINTS_FILE)) as saver:
-        state = build_graph(model, checkpointer=saver).get_state(
+        state = build_graph(Mock(spec=BaseChatModel), checkpointer=saver).get_state(
             {"configurable": {"thread_id": "python"}}
         )
         assert len(state.values["messages"]) == 4

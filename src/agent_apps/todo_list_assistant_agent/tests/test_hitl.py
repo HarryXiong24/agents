@@ -32,6 +32,7 @@ def isolated_storage(tmp_path, monkeypatch):
 
 def make_model(*responses):
     model = Mock(spec=BaseChatModel)
+
     model.bind_tools.return_value = model
     model.invoke.side_effect = responses
     return model
@@ -170,7 +171,8 @@ def test_multiple_approvals_reuse_completed_calls_after_restart(tmp_path, monkey
     with SqliteSaver.from_conn_string(database) as saver:
         graph = build_graph(model, saver)
         first_pause = graph.invoke(
-            {"messages": [HumanMessage("Save and delete both.")]}, config
+            {"messages": [HumanMessage("Save and delete both.")]},
+            config,
         )
         assert first_pause["__interrupt__"][0].value["tool_call_id"] == "first"
         assert save.call_count == 1
@@ -229,6 +231,7 @@ folder = Path(sys.argv[1])
 memory.DATABASE_FILE = folder / "todos.sqlite"
 memory.save_todo = Mock(side_effect=AssertionError("A completed save must not repeat"))
 model = Mock(spec=BaseChatModel)
+
 model.bind_tools.return_value = model
 model.invoke.return_value = AIMessage(content="Done.")
 config = {"configurable": {"thread_id": "process"}}
@@ -351,7 +354,7 @@ def test_main_menu_reopens_saved_approval_without_new_user_turn(tmp_path, monkey
     app.main()
     with SqliteSaver.from_conn_string(str(checkpoints.CHECKPOINTS_FILE)) as saver:
         assert checkpoints.list_threads(saver) == ["inbox"]
-        snapshot = build_graph(second, saver).get_state(
+        snapshot = build_graph(Mock(spec=BaseChatModel), saver).get_state(
             {"configurable": {"thread_id": "inbox"}}
         )
         assert not snapshot.next
@@ -368,6 +371,7 @@ def test_console_reports_summary_once_when_turn_pauses_for_approval(
     )
     memory.save_todo("Clean room", 30, "2026-11-06")
     model = Mock(spec=BaseChatModel)
+
     bound = Mock()
     model.bind_tools.return_value = bound
     model.invoke.return_value = AIMessage(

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from deepagents import create_deep_agent
+from deepagents import SubAgent, create_deep_agent
 from deepagents.backends import FilesystemBackend
 
 from agent_apps.agent_by_langgraph.tools.create_slide import create_slide
@@ -13,7 +13,7 @@ def slide_agent():
     sandbox.mkdir(parents=True, exist_ok=True)
     model = create_model()
 
-    slide_maker = {
+    slide_maker: SubAgent = {
         "name": "slide-maker",
         "description": "Turns a finished recommendation into a one-slide PowerPoint deck.",
         "system_prompt": "You turn research recommendations into slides, following your fleet-slide skill.",

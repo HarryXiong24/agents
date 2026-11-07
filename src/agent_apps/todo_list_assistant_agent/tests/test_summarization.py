@@ -18,13 +18,13 @@ from agent_apps.todo_list_assistant_agent import console
 from agent_apps.todo_list_assistant_agent import main as app
 from agent_apps.todo_list_assistant_agent.agent import checkpoints, memory
 from agent_apps.todo_list_assistant_agent.agent.graph import build_graph
-from agent_apps.todo_list_assistant_agent.agent.state import AgentState
-from agent_apps.todo_list_assistant_agent.agent.summarization import (
+from agent_apps.todo_list_assistant_agent.agent.nodes.summarize import (
     SummaryError,
     estimate_history_tokens,
     older_messages_to_summarize,
     summarize_conversation,
 )
+from agent_apps.todo_list_assistant_agent.agent.state import AgentState
 from agent_apps.todo_list_assistant_agent.config import AgentConfig
 from agent_apps.todo_list_assistant_agent.config import app as app_config
 
@@ -41,6 +41,7 @@ def isolate_storage(tmp_path, monkeypatch):
 
 def make_model():
     model = Mock(spec=BaseChatModel)
+
     bound = Mock()
     bound.invoke.side_effect = lambda _: AIMessage(content="Understood.")
     model.bind_tools.return_value = bound
@@ -318,7 +319,8 @@ def test_summary_failure_is_checkpointed_without_deletion_and_can_resume(tmp_pat
         graph = build_graph(model, saver)
         for number in range(3):
             graph.invoke(
-                {"messages": [HumanMessage("Python learning goal " * 30)]}, config
+                {"messages": [HumanMessage("Python learning goal " * 30)]},
+                config,
             )
         with pytest.raises(APIConnectionError):
             graph.invoke({"messages": [HumanMessage("Next question")]}, config)
@@ -399,6 +401,7 @@ agent_settings.AGENT_CONFIG = AgentConfig(summary_trigger_tokens=1)
 from agent_apps.todo_list_assistant_agent.agent.graph import build_graph
 memory.DATABASE_FILE = Path(sys.argv[1]) / "todos.sqlite"
 model = Mock(spec=BaseChatModel)
+
 bound = Mock()
 bound.invoke.side_effect = lambda _: AIMessage(content="Noted.")
 model.bind_tools.return_value = bound

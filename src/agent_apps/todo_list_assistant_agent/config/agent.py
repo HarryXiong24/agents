@@ -11,7 +11,7 @@ class AgentConfig:
     summary_trigger_tokens: int = 500
     # Keep this many completed user turns verbatim, in addition to the current turn.
     summary_keep_turns: int = 2
-    # Limit graph steps per invocation, including summary, model, and tool nodes.
+    # Limit graph steps per invocation, including summary, model, tools, and draft.
     recursion_limit: int = 20
     # Retain this many recent tool executions in each conversation's State.
     tool_history_limit: int = 10

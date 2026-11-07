@@ -12,23 +12,20 @@ English | [简体中文](VERSIONS.zh-CN.md)
 | V4 | SQLite checkpoints, saved conversation selection, and resume after failure | `MessagesState`, Checkpointer, `thread_id`, and console/storage separation |
 | V5 | Rolling summaries, configurable token threshold, local configuration, and Todo naming/storage | Context compression, complete turns, and `RemoveMessage` |
 | V6 | Custom tool-history reducer, execution records, history queries, and an `agent/` package with a central configuration entry point | Incremental State updates, runtime injection, persistence, and model access to custom state |
-| V7 (current) | Tool observation, human approval, middleware composition, and checkpointed per-call recovery | Wrappers, `interrupt`, `Command(resume=...)`, terminal decisions, and durable tasks |
+| V7 | Tool observation, human approval, middleware composition, and checkpointed per-call recovery | Wrappers, `interrupt`, `Command(resume=...)`, terminal decisions, and durable tasks |
+| V8 (current) | Structured todo drafts, business validation, checkpointed candidates, ordinary list queries and natural replies | Model JSON output versus local validation, user constraints, separate draft/saved data and fixed node dependencies |
 
 This document records what each version teaches, what it adds, and how to verify it. Append the same information when a future version adds another building block.
 
-The running code is **version 7**, adding per-tool observation middleware to
-version 6's custom State and history queries, plus human approval and durable
-per-call recovery. Version 5 covers summary compression, version 6 covers State
-maintenance, and version 7 covers composed wrappers, pause/resume, and tasks.
-The current assistant uses Todo names throughout its tools, functions, types,
-and SQLite storage. Versions 1 through 6 describe the learning history rather
-than separate runnable directories.
+The running code is **version 8**, generating and validating structured todo drafts
+while ordinary replies remain natural text. Earlier versions describe learning
+history rather than separate runnable folders.
 
 Code, prompts, tool descriptions, and terminal messages use English. The assistant replies in English by default, with another language available on explicit request. Exit with `exit` or `quit`.
 
-Current Agent execution and persistence modules live under `agent/`, with startup, console, and shared configuration at the application root. Earlier sections retain their historical paths; use the version 6 layout plus version 7's middleware and console approval flow when navigating current source.
+Current Agent execution and persistence modules live under `agent/`, with startup, console, and shared configuration at the application root. Earlier sections retain their historical paths; use the current README layout and version 8's `agent/nodes/` modules when navigating source.
 
-Diagrams show components and data flow. Versions 1-4 have **Model node** and **Tool node**; version 5 adds **Summary node**. Version 6 keeps those three nodes and adds custom state processing inside the tools step. Version 7 adds a wrapper inside `ToolNode` without adding nodes. Storage helpers
+Diagrams show components and data flow. Versions 1-4 have **Model node** and **Tool node**; version 5 adds **Summary node**. Version 6 keeps those three nodes and adds custom state processing inside the tools step. Version 7 adds wrappers inside `ToolNode` without adding nodes; version 8 adds a fourth draft node for structured generation and validation. Storage helpers
 and the console are ordinary Python functions.
 
 ## Version 1: console chat and minimal ReAct
@@ -1264,6 +1261,160 @@ Final verification:
 No unresolved code defects were found in the reviewed scope. Tests used mock
 models and temporary storage; no live model API, private configuration, or personal
 database was used. The documented transaction and replay limitations still apply.
+
+## Version 8: structured todo arrangement drafts
+
+### Learning goal and scope
+
+Learn to use model-generated structured data as input to deterministic program
+logic. The focused feature proposes durations for named tasks on a single date,
+within a user-specified total budget. It does not force every conversational reply
+into a schema. Todo records still have exactly project/minutes/date, and existing
+todos and conversations stay in their original databases.
+
+### Component diagram
+
+Only summarize/model/tools/draft are registered nodes. Pydantic schemas, validation,
+the request tool and formatted messages are components, not extra nodes.
+
+```mermaid
+flowchart TD
+    U[Console input] --> S[Summary node]
+    S --> M[Model node]
+    M -->|Tool calls| T[Tools node with tasks and middleware]
+    T -->|Ordinary results| M
+    M -->|Natural reply| E[END and print final AIMessage]
+    T -->|Accepted standalone request| D[New draft node]
+    R[Request constraints artifact] --> D
+    D --> J[JSON mode plus local TodoDraft parsing]
+    J --> V[Check names, dates and total budget]
+    V --> C[Checkpoint todo_draft and one AIMessage]
+    C --> E
+    C -->|Next explicit save request| M
+    T -->|save_todo only when requested| DB[Existing todo database]
+    classDef changed fill:#fff3df,stroke:#c76a00,stroke-width:2px;
+    class D,R,J,V,C changed;
+```
+
+### Components and reading order
+
+| Component | Responsibility |
+|---|---|
+| agent/schemas.py | TodoView records, TodoDraftRequest constraints, TodoDraft model output |
+| agent/tools.py | generate_todo_draft request validation; list_todos ordinary JSON query |
+| agent/nodes/tools.py | Sequential tasks, reject mixed draft batches, clear old draft, route |
+| agent/nodes/draft.py | Structured generation, business validation and one formatted AIMessage |
+| agent/state.py | Latest candidate as plain todo_draft data, separate from business storage |
+| agent/nodes/model.py and agent/prompts.py | Supply current saved todos and candidate separately |
+| agent/prompt_templates/draft_prompt.md | JSON/schema instructions for the dedicated call |
+| agent/graph.py | Bind dependencies and register four matching node methods |
+| console.py | Print the final assistant reply; no tool-list renderer or deduplication |
+| tests/test_draft.py | Provider request shape, validation, State, recovery and explicit saving |
+
+Read the table top to bottom. Node classes receive fixed dependencies through
+constructors; conversation data remains in AgentState. No Runtime.context object
+or partial is needed. The structured wrapper is created only on the draft path.
+Task closures still capture the executor and receive only State/call data; node
+objects, models and clients never become serialized task arguments.
+
+### Two layers of validation
+
+TodoDraftRequest holds distinct, nonblank task names with no surrounding whitespace,
+a real canonical date and a total budget of 1–1440 minutes. There must be at least
+one minute per task. These constraints are extracted by the outer model; intent
+recognition and accurate copying of user requirements remain model-dependent.
+The draft generator receives this accepted request separately from its own output.
+
+TodoDraft contains a nonempty list of TodoView records. Pydantic checks strict
+field types, extra fields, names, real dates and 1–1440 integer minutes per item.
+Then validate_draft checks each requested task appears exactly once, each date
+matches and the sum stays within the budget. For example, 70+30 minutes is valid
+record structure but violates a 90-minute request. No fixed per-task durations,
+multiple dates, priorities, start times or conflict detection are implemented.
+
+### Generation, presentation and persistence
+
+The request tool uses content_and_artifact only to hand constraints to the draft
+node internally. It does not generate or save a plan. Its history record describes
+the accepted request, not completion of the separate generation step.
+
+DraftNode uses with_structured_output(TodoDraft, method="json_mode", include_raw=True).
+The prompt includes JSON instructions and the actual schema. The provider needs
+JSON object mode, not native strict-schema enforcement. Pydantic supplies local
+schema checks. Raw metadata is checked for truncation/filtering or tool calls;
+parser and business failures return one explanation without an active candidate.
+There is no graph-level repair retry. API failures propagate to console handling,
+leaving the draft node resumable; existing SDK retry settings still apply.
+
+A successful draft produces plain todo_draft State and one code-formatted AIMessage,
+then goes to END. No second model paraphrases it, and the internal JSON is not printed
+separately. Labels are currently English; task names are preserved. Ordinary chat
+remains natural text. list_todos returns ordinary JSON text for the model to answer;
+its artifact renderer, shown_queries set and replay loop have been removed.
+
+The draft survives restart and summary removal because it is an independent State
+field. It enters the next model prompt separately from saved todos. A replacement
+request clears it before generation. After a failed replacement, the next model
+prompt explicitly reports no active draft, rather than treating an old historical
+proposal as current. Draft generation never inserts or updates todo records. On a later explicit save request,
+the model can call save_todo per record, using the same middleware and configured
+approval rules (default: deletion only). Each write commits separately; partial
+success is possible. The draft remains a proposal snapshot, not a saved-status flag.
+
+A draft request must be alone in its tool batch. Mixed batches are rejected before
+any tools execute and every call receives an error ToolMessage. This prevents a
+mixed draft/save batch from writing before the draft has been displayed. Recovery
+of unfinished checkpoints pending at the removed respond node is outside scope;
+existing data is not deleted or migrated.
+
+### Exercises
+
+1. Request Python and English on 2026-11-09 within 90 minutes, without saving.
+2. Inspect get_state(config).values["todo_draft"] and confirm the database is unchanged.
+3. In the tests, supply 70+30 minutes and observe business rejection despite valid types.
+4. Supply a wrong date, missing/duplicate task, string duration or truncated response.
+5. Restart the conversation and discuss the saved candidate; then explicitly save one item.
+6. Enable save_todo in approval_tools to observe approval without regenerating the draft.
+7. Trace one generated JSON result to local validation and the single displayed AIMessage.
+8. Compare this path with ordinary list_todos and normal chat, which need no output schema.
+
+### Verification
+
+```bash
+uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests -W error
+```
+
+Current offline suite: **196 passed**. Ruff lint/format and Pyright checks are run
+against the application. Tests cover ordinary queries, record/request constraints,
+JSON-mode HTTP request shape through the real Groq wrapper with a mock transport,
+business rejection, parser/truncation failures, no implicit writes, mixed batches,
+single display, checkpoint restart, summary removal with draft preservation,
+API-failure resume, explicit save approval, and accurate failure messages after
+earlier successful writes.
+Tests use simulated models and temporary databases, with no real key, network API
+or personal database. Live provider/model JSON-mode compatibility is not verified.
+
+The final review corrected generation failure messages that could imply earlier
+saves were undone, made the absence of an active draft explicit after replacement
+failure, and added max_tokens truncation handling. These fixes remain in this
+learning version; the budget/retry/streaming roadmap is unchanged.
+
+## Confirmed learning roadmap (planned)
+
+The user confirmed the following learning order on 2026-11-06. These are planned
+topics, not implemented features; version 8 is implemented above and the remaining
+roadmap starts with version 9. Design each
+version's details before implementing it when requested by the user.
+
+| Planned version | Main topic | Intended learning scope |
+|---|---|---|
+| V9 | Execution budgets and controlled exit | Per-turn model/tool call limits, counters in State, reset on a new user turn, preserve budgets through HITL/task replay, and finish with complete tool-result pairing |
+| V10 | Error classification and retries | Distinguish argument/network/rate-limit failures, retry only suitable failures, coordinate SDK/task/middleware retry layers, and understand idempotency and duplicate writes |
+| V11 | Streaming interaction | Incrementally display model replies, tool progress, and approval events; distinguish streamed events from final State and preserved checkpoints |
+
+Continue with one main building block per version and keep both language editions,
+component diagrams, examples, and verification records synchronized. Later topics
+are outside this confirmed roadmap until the user chooses them.
 
 ## Recording future versions
 

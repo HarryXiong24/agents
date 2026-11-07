@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from deepagents import create_deep_agent
+from deepagents import SubAgent, create_deep_agent
 from deepagents.backends import FilesystemBackend
 
 from .tools.search import search
@@ -12,7 +12,7 @@ def multi_deep_agent():
     sandbox.mkdir(parents=True, exist_ok=True)
     model = create_model()
 
-    research_subagent = {
+    research_subagent: SubAgent = {
         "name": "vehicle-researcher",
         "description": "Researches a single electric vehicle and returns a short list of facts about it.",
         "system_prompt": """

@@ -1,3 +1,5 @@
+from langchain_core.messages import HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
@@ -17,7 +19,7 @@ def init_graph_basic():
     builder.add_edge("silly", END)
     graph = builder.compile()
 
-    result = graph.invoke(State({"messages": [{"role": "user", "content": "Hello"}]}))
+    result = graph.invoke({"messages": [HumanMessage("Hello")]})
     print(result["messages"][-1].content)
 
     builder = StateGraph(State)
@@ -31,16 +33,7 @@ def init_graph_basic():
     print_graph(graph.get_graph())
 
     result = graph.invoke(
-        State(
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "What is a directed graph, in one sentence?",
-                    }
-                ]
-            }
-        )
+        {"messages": [HumanMessage("What is a directed graph, in one sentence?")]}
     )
     print(result["messages"][-1].content)
 
@@ -61,16 +54,13 @@ def init_graph_with_tools():
     print_graph(graph.get_graph())
 
     result = graph.invoke(
-        State(
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "Use your search tool to tell me what is today's date in New York City, in one sentence.",
-                    }
-                ]
-            }
-        )
+        {
+            "messages": [
+                HumanMessage(
+                    "Use your search tool to tell me what is today's date in New York City, in one sentence."
+                )
+            ]
+        }
     )
     print(result["messages"][-1].content)
 
@@ -94,16 +84,13 @@ def init_graph_with_second_node():
     print_graph(graph.get_graph())
 
     result = graph.invoke(
-        State(
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "Use your search tool to tell me what is today's date in New York City, in one sentence.",
-                    }
-                ]
-            }
-        )
+        {
+            "messages": [
+                HumanMessage(
+                    "Use your search tool to tell me what is today's date in New York City, in one sentence."
+                )
+            ]
+        }
     )
     print(result["messages"][-1].content, "\n", result["chinese"])
 
@@ -128,22 +115,13 @@ def init_graph_with_memory():
     graph = builder.compile(checkpointer=memory)
     print_graph(graph.get_graph())
 
-    config = {"configurable": {"thread_id": "conversation-1"}}
+    config: RunnableConfig = {"configurable": {"thread_id": "conversation-1"}}
     graph.invoke(
-        State(
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "Hello there! My name is Harry.",
-                    }
-                ]
-            }
-        ),
+        {"messages": [HumanMessage("Hello there! My name is Harry.")]},
         config,
     )
     result = graph.invoke(
-        {"messages": [{"role": "user", "content": "What is my name?"}]}, config
+        {"messages": [HumanMessage("What is my name?")]}, config
     )
     print(result["messages"][-1].content, "\n", result["chinese"])
 
@@ -162,10 +140,10 @@ def init_graph_with_memory():
     print("Number of saved checkpoints:", len(history))
 
     for h in reversed(history):  # history is newest first; reversed reads as a story
-        m = h.metadata
+        m = h.metadata or {}
         queued = ", ".join(t.name for t in h.tasks) or "(run complete)"
         print(
-            f"step {m['step']:>2}  {m['source']:<5}  messages={len(h.values.get('messages', []))}  about to run: {queued}"
+            f"step {m.get('step', '?'):>2}  {m.get('source', 'unknown'):<5}  messages={len(h.values.get('messages', []))}  about to run: {queued}"
         )
 
     # Time travel: take a checkpoint from earlier and resume the graph from that exact moment
@@ -178,12 +156,7 @@ def init_graph_with_memory():
         "messages",
     )
 
-    replay_config = {
-        "configurable": {
-            "thread_id": "conversation-1",
-            "checkpoint_id": earlier.config["configurable"]["checkpoint_id"],
-        }
-    }
+    replay_config = earlier.config
 
     # passing None means "resume from the checkpoint, but don't add any new messages yet"
     resumed = graph.invoke(None, replay_config)
@@ -196,7 +169,7 @@ def init_graph_with_memory():
 
     # Passing a new message means "resume from the checkpoint, and add this new message to the conversation"
     again = graph.invoke(
-        {"messages": [{"role": "user", "content": "What is my name?"}]},
+        {"messages": [HumanMessage("What is my name?")]},
         replay_config,
     )
     print(again["messages"][-1].content)

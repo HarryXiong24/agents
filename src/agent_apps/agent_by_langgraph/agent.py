@@ -1,5 +1,6 @@
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 
 from agent_apps.agent_by_langgraph.middlewares.log_agent_end import log_agent_end
@@ -40,7 +41,7 @@ def agent():
     # Async version
     # result = await agent.ainvoke()
 
-    config = {"configurable": {"thread_id": "trip-planning"}}
+    config: RunnableConfig = {"configurable": {"thread_id": "trip-planning"}}
 
     # Invoke the agent with a user message
     result = agent.invoke(

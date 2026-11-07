@@ -110,7 +110,16 @@ implementation before describing behavior; preserve unrelated user changes.
 
 - Keep composition and terminal interaction in `main.py` and `console.py`.
   Keep Agent execution and its persistence helpers in `agent/`, including
-  `memory.py` and `checkpoints.py`.
+  `memory.py` and `checkpoints.py`. Put graph node implementations in `agent/nodes/`;
+  keep `agent/graph.py` focused on fixed dependency assembly, registration, edges,
+  and compilation. Node modules and execution methods match graph registration keys;
+  classes are ModelNode, ToolsNode, SummarizeNode, and DraftNode. Bind fixed models,
+  settings, and executors through constructors when building the graph. Instance fields
+  hold dependencies only; conversation data stays in AgentState. Do not require a
+  custom Context for fixed dependencies. Tasks capture executors in closures and
+  receive only State/call data; never pass self, clients, executors, or Runtime as
+  serialized task arguments. Preserve registered node/task names and execution order.
+  ToolRuntime injection inside tools remains supported independently of this layout.
 - Treat `config/` as the configuration entry point, with a public API in
   `config/__init__.py` and environment-file reading confined to `config/app.py`.
   Group settings into `agent.py`, `model.py`, and `app.py`; keep `__init__.py`
@@ -205,7 +214,13 @@ implementation before describing behavior; preserve unrelated user changes.
 ### 10. 模块边界与配置
 
 - `main.py` 与 `console.py` 负责组装和终端交互；Agent 执行及其持久化辅助模块放在
-  `agent/`，包括 `memory.py` 和 `checkpoints.py`。
+  `agent/`，包括 `memory.py` 和 `checkpoints.py`。图节点实现集中放在 `agent/nodes/`，
+  `agent/graph.py` 专注固定依赖组装、节点注册、连边与编译。
+  节点模块名、执行方法名与图注册名一致，类名为 ModelNode、ToolsNode、SummarizeNode、DraftNode。
+  构图时通过构造函数绑定固定模型、配置和执行器；实例字段只保存依赖，会话数据保留在 AgentState。
+  固定依赖不要求自定义 Context。任务通过闭包捕获执行器，参数只接收 State／调用数据，
+  不将 self、客户端、执行器或 Runtime 作为序列化任务参数。保持注册节点／任务名与执行顺序。
+  工具内的 ToolRuntime 注入独立于这种布局，继续保留。
 - `config/` 是配置统一入口，由 `config/__init__.py` 提供公开 API，
   环境文件读取集中在 `config/app.py`，按 `agent.py`、`model.py`、`app.py` 三类组织；
   `__init__.py` 只重新导出接口，各自模块定义 `AgentConfig` 和 `ModelConfig`，

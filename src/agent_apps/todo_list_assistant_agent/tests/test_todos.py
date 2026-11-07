@@ -32,6 +32,7 @@ def isolate_storage(tmp_path, monkeypatch):
 
 def make_model():
     model = Mock(spec=BaseChatModel)
+
     model.bind_tools.return_value = model
     model.invoke.side_effect = lambda _: AIMessage(content="Here are your todos.")
     return model
