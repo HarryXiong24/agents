@@ -33,7 +33,8 @@ Todos persist across restarts and are shared by conversations in this applicatio
 | `minutes` | Estimated duration, an integer from 1 to 1440 |
 | `date` | Scheduled date in `YYYY-MM-DD` format |
 
-All three fields are required when saving. There is no completion/status field: saying a todo is done does not delete it or mark it complete. Updating the same name and date changes only duration; changing a name or date adds another record, rather than replacing the old one.
+All three fields are required when saving. The save tool requires an actual integer
+for `minutes`; booleans, numeric strings, and floats are rejected rather than converted. There is no completion/status field: saying a todo is done does not delete it or mark it complete. Updating the same name and date changes only duration; changing a name or date adds another record, rather than replacing the old one.
 
 Todo records use `data/todos.sqlite`, the `todos` table, and the `TodoItem` type. Storage functions are `load_todos()`, `save_todo()`, and `delete_todo()` in `agent/memory.py`; the model-facing tools are `save_todo` and `delete_todo` in `agent/tools.py`. Conversations and summaries use `data/todo_checkpoints.sqlite`.
 
@@ -243,6 +244,48 @@ Budget stops end only the current turn, so the console can accept another messag
 still raise GraphRecursionError and end the console session. No separate budget,
 reservation, preparation or finish node is introduced.
 
+## Error handling and model SDK retries
+
+Errors have different owners. Known input errors return actionable tool results;
+storage failures stop the current run; unmarked programming errors keep their traceback.
+
+| Category | Behavior |
+|---|---|
+| Tool argument/schema errors | ToolInvocationError or Pydantic ValidationError becomes an error ToolMessage with field details |
+| Explicit value/type validation | InputValueError / InputTypeError becomes an error ToolMessage with the reason |
+| Calculator nonfinite values, zero divisor, overflow | Raise InputValueError, so the protocol status is error rather than success text |
+| Disk or SQLite failure | Propagate to the console, preserve committed work, and stop without retrying the tool |
+| Unmarked ValueError, TypeError, RuntimeError and other bugs | Propagate for debugging; no generic parameter-error disguise |
+| HITL control signals | Re-raise to LangGraph; never treat approval pauses as retryable failures |
+
+The two small validation classes in `agent/errors.py` inherit ValueError and TypeError
+respectively. Direct Python callers can still catch the corresponding built-in type.
+Storage validators and explicit tool checks mark their expected errors; schema validators
+retain Pydantic's normal wrapping. `handle_tool_error` formats only these known input
+errors. The save tool uses Pydantic StrictInt at its boundary so conversions cannot
+bypass the storage type check. A corrected tool request is a new request and consumes another tool slot.
+The dedicated draft node keeps its existing schema/business rejection handling.
+
+Only the Groq SDK retries model HTTP requests. `ModelConfig.max_retries=1` in
+`config/model.py` means one retry after the initial attempt, at most two attempts.
+The same configured client is used for ReAct, summaries and draft generation. No node,
+@task or tool-middleware retry policy is layered on top. The installed SDK normally
+retries connection/timeouts, HTTP 408/409/429 and server errors, using its own backoff
+and supported Retry-After/server hints. Typical 400/401/403/404/422 responses are not
+retried absent a server retry override. Invalid structured output after an HTTP 200
+is not an SDK network failure and does not trigger an automatic draft repair pass.
+
+The console distinguishes authentication, permission, missing model/endpoint, request
+format, rate/quota, timeout, connection and server errors, retaining provider details.
+No extra HTTP request is started by the console. Edit the model retry setting and
+restart to change the SDK allowance; the agent-local .env keys remain unchanged.
+
+A successful model request after an SDK retry increments model_calls_this_turn once;
+exhausted failures return no node update. Tools are not automatically retried, even
+when a disk error may be temporary. On a later explicit restart/resume, checkpointed
+completed task results can be reused; this does not close the transaction gap between
+an external write and its checkpoint. Do not infer exactly-once writes or rollbacks.
+
 ## Rolling conversation summaries
 
 Before the first model call of each new user turn, the summary node estimates tokens in the existing summary and message history. At or above the configured threshold, it combines the old summary with older completed turns, keeping the latest **two completed user turns plus the current turn** in their original form. A turn includes all of its tool requests, results, and final answer; it is not a single message.
@@ -364,12 +407,12 @@ constructor parameter; the right function connects approval outside observation.
 The `observe_tool_call(request, execute)` function handles observation.
 It runs only when execution is allowed, so its elapsed time excludes human waiting
 and rejected calls produce no execution observation lines. Its `finally` block logs
-returned protocol status or a propagated exception. `ToolMessage.status` is not a
-business-success detector: division by zero can return an explanatory string with
-status `success`. `Command` results are passed through by the wrapper.
+returned protocol status or a propagated exception. The observer does not infer
+business success from content. Calculator validation now raises an input error,
+which ToolNode returns with status `error`. `Command` results pass through unchanged.
 
 `handle_tool_error()` re-raises graph control signals such as approval interrupts;
-ordinary tool errors retain the existing generic error message. Middleware is not
+known input errors include their reason, while storage failures and unmarked bugs propagate. Middleware is not
 registered as a tool and requires no prompt instruction to run. Approval requests
 and execution decisions are enforced by code on the graph path; direct Python
 calls to storage functions or tool objects do not pass through this middleware.
@@ -464,6 +507,7 @@ todo_list_assistant_agent/
 │   ├── graph.py                  # Fixed dependencies, node objects, and edges
 │   ├── state.py                  # Messages, summary, tool history, and draft
 │   ├── schemas.py                # Request and generated draft schemas
+│   ├── errors.py                 # Explicit value/type validation errors
 │   ├── tools.py                  # Time, arithmetic, todos, and history lookup
 │   ├── middleware.py             # Approval, observation, and composition
 │   ├── model.py                  # Chat model creation
@@ -548,7 +592,7 @@ its persistence helpers; those helpers depend on configuration rather than termi
 interaction. `.env` and `data/` stay at the application root. `config.DATA_DIR`
 anchors both SQLite files, independently of module locations.
 
-Edit the relevant `.md` file under `agent/prompt_templates/` to change instructions. `agent/prompts.py` loads templates as UTF-8 and formats todo data. Templates load at import time, so restart after editing. The short tool-error instruction remains the `TOOL_ERROR_MESSAGE` string in `agent/prompts.py`.
+Edit the relevant `.md` file under `agent/prompt_templates/` to change instructions. `agent/prompts.py` loads templates as UTF-8 and formats todo data. Templates load at import time, so restart after editing. The short input-error prefix remains the `TOOL_ERROR_MESSAGE` string in `agent/prompts.py`.
 
 Filenames use lowercase and Python constants use uppercase; their casing does not need to match. Node modules import prompt helpers through `from ..prompts import ...`; `main.py` imports `build_graph()` through `from .agent.graph import build_graph`.
 
@@ -602,4 +646,4 @@ From the repository root:
 uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests
 ```
 
-Tests use simulated models, temporary configuration files, and temporary databases without real API keys or network. They cover one-time dependency binding, conversation isolation across shared node objects, dependencies excluded from checkpoints, configuration isolation, threshold boundaries, rolling summaries, tool-pair preservation, failed summary recovery, cross-process restoration, pending todo tool recovery, bounded tool history, read-only history queries, runtime injection, summary preservation of tool records, todo CRUD, Unicode input and storage, per-tool observation, approval/rejection, terminal exit/restart, sequential approvals, cross-process reuse of completed tasks, request/schema validation, draft business checks, single-reply presentation, restart recovery, explicit saving, JSON-mode requests, ordinary queries, checkpointed natural replies at END, model/tool limits, whole-batch rejection, new-turn resets, and usage preservation across approval/failure resumes.
+Tests use simulated models, temporary configuration files, and temporary databases without real API keys or network. They cover one-time dependency binding, conversation isolation across shared node objects, dependencies excluded from checkpoints, configuration isolation, threshold boundaries, rolling summaries, tool-pair preservation, failed summary recovery, cross-process restoration, pending todo tool recovery, bounded tool history, read-only history queries, runtime injection, summary preservation of tool records, todo CRUD, Unicode input and storage, per-tool observation, approval/rejection, terminal exit/restart, sequential approvals, cross-process reuse of completed tasks, request/schema validation, draft business checks, single-reply presentation, restart recovery, explicit saving, JSON-mode requests, ordinary queries, checkpointed natural replies at END, model/tool limits, whole-batch rejection, new-turn resets, usage preservation across approval/failure resumes, error classification, SDK HTTP retries, and completed-write reuse after storage failure.

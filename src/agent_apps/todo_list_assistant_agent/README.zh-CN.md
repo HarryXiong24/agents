@@ -29,7 +29,8 @@ SQLite 会话检查点、待办数据库，以及通过自定义 State reducer �
 | `minutes` | 预计耗时，1～1440 的整数分钟 |
 | `date` | 安排日期，格式为 `YYYY-MM-DD` |
 
-保存仍需要三个字段。当前没有完成状态，表达“做完了”不会自动删除，也不能标记完成。同名同日期更新只改变耗时；修改名称或日期会新增记录，不会替换旧记录。
+保存仍需要三个字段。保存工具要求 `minutes` 是真正的整数，
+布尔值、数字字符串和浮点数会被拒绝，不自动转换。当前没有完成状态，表达“做完了”不会自动删除，也不能标记完成。同名同日期更新只改变耗时；修改名称或日期会新增记录，不会替换旧记录。
 
 待办使用 `data/todos.sqlite` 数据库、`todos` 表和 `TodoItem` 类型。`agent/memory.py` 中的存储函数为 `load_todos()`、`save_todo()`、`delete_todo()`；`agent/tools.py` 中提供给模型的工具为 `save_todo` 和 `delete_todo`。会话与摘要使用 `data/todo_checkpoints.sqlite`。
 
@@ -218,6 +219,40 @@ Not saved. Ask to save this draft if you want to keep it.
 把它调得太低仍可能触发 GraphRecursionError 并结束终端会话。
 不新增预算、额度预留、准备或结束节点。
 
+## 异常分类与模型 SDK 重试
+
+不同错误交给不同层处理：已知输入错误变成可修正的工具结果，存储失败停止当前运行，
+未标记的程序错误保留 traceback。
+
+| 类别 | 行为 |
+|---|---|
+| 工具参数／schema 错误 | ToolInvocationError 或 Pydantic ValidationError 转为带字段原因的错误 ToolMessage |
+| 明确的值／类型校验 | InputValueError／InputTypeError 转为带具体原因的错误 ToolMessage |
+| 计算器非有限数、除数为零、溢出 | 抛出 InputValueError，协议状态为 error，不再作为成功文本返回 |
+| 磁盘或 SQLite 失败 | 向外传播到终端，保留已提交工作，停止且不自动重试工具 |
+| 未标记的 ValueError、TypeError、RuntimeError 等程序错误 | 保留 traceback，不伪装成参数问题 |
+| HITL 控制信号 | 继续抛给 LangGraph，不把审批暂停当作可重试失败 |
+
+`agent/errors.py` 的两个小型校验异常分别继承 ValueError 和 TypeError，
+直接 Python 调用方仍可捕获相应的内置类型。存储校验和工具的明确检查使用这些标记，
+schema 校验器继续由 Pydantic 包装；handle_tool_error 只格式化这些已知输入错误。
+保存工具在入口使用 Pydantic StrictInt，避免自动转换绕过存储类型检查。
+模型修正参数后再次调用是一个新请求，继续占用工具次数。专用草案节点保留原有结构／业务拒绝处理。
+
+模型 HTTP 请求只由 Groq SDK 重试。`config/model.py` 的 `ModelConfig.max_retries=1`
+表示首次尝试后最多重试一次，合计最多两次。ReAct、摘要和草案共用配置好的客户端，
+不叠加节点、@task 或工具中间件的重试策略。当前安装的 SDK 通常会重试连接／超时、
+HTTP 408／409／429 和服务端错误，自行处理退避及支持的 Retry-After／服务端提示；
+没有服务端重试覆盖提示时，常见 400／401／403／404／422 不重试。
+HTTP 200 后的结构化解析失败不是 SDK 网络失败，不会自动再生成一遍草案。
+
+终端分别说明认证、权限、模型／端点不存在、请求格式、限流／配额、超时、连接与服务端错误，
+并保留供应商详情。终端不发起额外 HTTP 重试。修改模型重试设置后重启生效，agent 本地 .env 字段不变。
+
+SDK 重试后成功，model_calls_this_turn 只增加一次；全部失败时节点不返回计数更新。
+工具不自动重试，即使磁盘错误可能只是暂时故障。之后明确重启／恢复时，可以复用已保存的任务结果，
+但这不消除外部写入与检查点之间的事务窗口，不能理解为严格只写一次或自动回滚。
+
 ## 滚动对话摘要
 
 每个新用户轮次第一次调用模型之前，摘要节点估算“已有摘要＋消息历史”的 token 数。达到配置阈值后，用“旧摘要＋较早的完整对话”生成新摘要，原样保留最近 **2 个完整用户轮次＋当前轮**。一轮包含工具请求、工具结果和最终回答，并不是一条消息。
@@ -329,10 +364,10 @@ Approve this call? [y/n/exit]:
 `ToolNode` 接收 `wrap_tool_call=tool_call_middleware`，左侧是构造参数名，
 右侧函数把审批放在观察外层。`observe_tool_call(request, execute)` 负责观察。
 只有获准执行时才进入观察，所以计时不包含人工等待，拒绝请求没有工具执行观察日志。
-观察函数的 `finally` 输出返回协议状态或向外传播的异常；`ToolMessage.status` 不负责判断
-业务成功，例如除零说明字符串对应的协议状态仍可能是 `success`。包装函数原样透传 `Command`。
+观察函数的 `finally` 输出返回协议状态或向外传播的异常，不从内容推断业务成功。
+计算器校验现在抛出输入错误，由 ToolNode 返回 `error` 状态；包装函数原样透传 `Command`。
 
-`handle_tool_error()` 将审批暂停等图控制信号继续向外抛出；普通工具异常仍返回原有通用错误提示。
+`handle_tool_error()` 将审批暂停等图控制信号继续向外抛出；已知输入错误包含具体原因，存储失败和未标记程序错误继续向外传播。
 中间件不注册成工具，不依赖提示词才能运行。图执行路径上的审批请求与决定由代码处理；
 直接从 Python 调用存储函数或工具对象，不经过这层中间件。
 
@@ -419,6 +454,7 @@ todo_list_assistant_agent/
 │   ├── graph.py                  # 固定依赖、节点对象与流程连线
 │   ├── state.py                  # 消息、摘要、工具历史和草案
 │   ├── schemas.py                # 请求与生成草案的 schema
+│   ├── errors.py                 # 明确的值／类型校验异常
 │   ├── tools.py                  # 时间、计算、待办和历史查询
 │   ├── middleware.py             # 人工审批、观察与组合
 │   ├── model.py                  # 创建聊天模型
@@ -498,7 +534,7 @@ result = graph.invoke(
 持久化模块依赖配置，不依赖终端交互。`.env` 与 `data/` 留在应用根目录，
 `config.DATA_DIR` 固定两个 SQLite 文件的位置，不随模块移动而改变。
 
-修改助手行为时编辑 `agent/prompt_templates/` 中对应 `.md` 文件；`agent/prompts.py` 使用 UTF-8 读取它们，再将待办数据填入模板。模板在模块导入时读取，编辑后重新启动程序生效。简短的工具错误提示保留为 `agent/prompts.py` 中的 `TOOL_ERROR_MESSAGE` 字符串。文件名使用小写，Python 常量名使用大写，二者没有必须一致的要求。节点模块通过 `from ..prompts import ...` 使用统一入口，`main.py` 通过 `from .agent.graph import build_graph` 导入图构建函数。
+修改助手行为时编辑 `agent/prompt_templates/` 中对应 `.md` 文件；`agent/prompts.py` 使用 UTF-8 读取它们，再将待办数据填入模板。模板在模块导入时读取，编辑后重新启动程序生效。简短的输入错误前缀保留为 `agent/prompts.py` 中的 `TOOL_ERROR_MESSAGE` 字符串。文件名使用小写，Python 常量名使用大写，二者没有必须一致的要求。节点模块通过 `from ..prompts import ...` 使用统一入口，`main.py` 通过 `from .agent.graph import build_graph` 导入图构建函数。
 
 `main.py` 打开 Saver，通过 `threads = checkpoints.list_threads(checkpointer)` 获取普通列表，再交给 `console.py` 的 `select_thread(threads)`。菜单不访问数据库；`agent/checkpoints.py` 集中管理 `CHECKPOINTS_FILE` 和会话查询 SQL，`console.py` 管理 `select_thread()` 和 `chat()`。入口直接进入会话列表，不解析命令行参数。
 
@@ -542,4 +578,4 @@ token 阈值、完整轮次保留和 `RemoveMessage`。结构图、阅读顺序�
 uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests
 ```
 
-测试使用模拟模型、临时配置文件和临时数据库，不需要真实密钥或网络。覆盖依赖一次性绑定、共享节点对象下的会话隔离、依赖不写入检查点、配置隔离、触发阈值、滚动摘要、工具配对、摘要失败恢复、跨进程恢复、待办工具中断恢复、工具记录数量限制、只读历史查询、runtime 注入、摘要后的工具记录保留、待办增删改查、中文输入和存储，工具观察、批准／拒绝、终端退出后续审、多次顺序审批，跨进程复用已完成任务、请求／schema 校验、草案业务检查、单次回复、重启恢复、明确保存、JSON mode 请求、普通查询、自然回复持久化、模型／工具上限、整批拒绝、新轮次重置与审批／失败恢复时的用量保留。
+测试使用模拟模型、临时配置文件和临时数据库，不需要真实密钥或网络。覆盖依赖一次性绑定、共享节点对象下的会话隔离、依赖不写入检查点、配置隔离、触发阈值、滚动摘要、工具配对、摘要失败恢复、跨进程恢复、待办工具中断恢复、工具记录数量限制、只读历史查询、runtime 注入、摘要后的工具记录保留、待办增删改查、中文输入和存储，工具观察、批准／拒绝、终端退出后续审、多次顺序审批，跨进程复用已完成任务、请求／schema 校验、草案业务检查、单次回复、重启恢复、明确保存、JSON mode 请求、普通查询、自然回复持久化、模型／工具上限、整批拒绝、新轮次重置、审批／失败恢复时的用量保留、异常分类、SDK HTTP 重试与存储失败后复用已完成写入。

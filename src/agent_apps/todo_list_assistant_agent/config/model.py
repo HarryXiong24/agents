@@ -15,6 +15,8 @@ class ModelConfig:
     base_url: str
     temperature: float = 0
     timeout: float = 30
+    # Groq SDK retries after the initial request: 1 allows at most 2 attempts.
+    # No graph-node or tool retry loop is layered on top of this setting.
     max_retries: int = 1
 
 

@@ -8,8 +8,10 @@ from typing import Any, Literal
 
 from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
+from pydantic import StrictInt
 
 from . import memory
+from .errors import InputValueError
 from .schemas import TodoDraftRequest
 from .state import AgentState
 
@@ -31,10 +33,11 @@ def calculate(
     operation must be add, subtract, multiply, or divide.
     Example: seven 45-minute tasks use a=45, b=7, operation="multiply".
     Perform one operation per call; use the result in subsequent calls as needed.
+    Nonfinite values, division by zero and numeric overflow are input errors.
     """
     print(f"Tool: Calculating {a} {operation} {b}.")
     if not math.isfinite(a) or not math.isfinite(b):
-        return "Cannot calculate: enter finite numbers."
+        raise InputValueError("Enter finite numbers.")
 
     # Explicit branches keep the code readable without evaluating generated code.
     if operation == "add":
@@ -45,26 +48,28 @@ def calculate(
         result = a * b
     else:
         if b == 0:
-            return "Cannot calculate: the divisor must not be zero. Check the numbers or explain the issue."
+            raise InputValueError("The divisor must not be zero.")
         result = a / b
 
     if not math.isfinite(result):
-        return "Cannot calculate: the result is outside the supported numeric range."
+        raise InputValueError("The result is outside the supported numeric range.")
     return str(result)
 
 
 @tool
-def save_todo(project: str, minutes: int, date: str) -> str:
+def save_todo(project: str, minutes: StrictInt, date: str) -> str:
     """Add or update a todo across restarts when the user explicitly requests it.
 
     project is the todo name, minutes is its estimated duration from 1 to 1440,
     and date is the scheduled date in YYYY-MM-DD format. All fields are required.
+    minutes must be an actual integer, not a boolean, numeric string, or float.
     Example: project="Clean room", minutes=30, date="2026-11-04".
     Ask for missing fields. Resolve relative dates with the time tool and convert hours to minutes.
     The same name and date updates duration; a different name or date adds a todo.
     This tool does not rename, reschedule, or mark todos complete.
     """
-    # Report success only after the write; the tool node handles execution errors.
+    # StrictInt prevents Pydantic from converting True, "30", or 30.0 before
+    # storage validation. Report success only after the write has committed.
     todo = memory.save_todo(project, minutes, date)
     result = f"Saved todo: {todo['project']}, estimated {todo['minutes']} minutes, scheduled for {todo['date']}."
     print(f"Tool: {result}")
@@ -105,9 +110,16 @@ def list_todos(project: str | None = None, date: str | None = None) -> str:
     if project is not None:
         project = project.strip()
         if not project:
-            raise ValueError("The todo name filter must not be blank.")
-    if date is not None and calendar_date.fromisoformat(date).isoformat() != date:
-        raise ValueError("The date filter must use YYYY-MM-DD format.")
+            raise InputValueError("The todo name filter must not be blank.")
+    if date is not None:
+        try:
+            parsed_date = calendar_date.fromisoformat(date)
+        except ValueError as exc:
+            raise InputValueError(
+                "The date filter must be a valid YYYY-MM-DD date."
+            ) from exc
+        if parsed_date.isoformat() != date:
+            raise InputValueError("The date filter must use YYYY-MM-DD format.")
     todos = []
     for todo in memory.load_todos():
         if project is not None and todo["project"] != project:
@@ -137,7 +149,7 @@ def generate_todo_draft(
     """
     request = TodoDraftRequest(projects=projects, date=date, max_minutes=max_minutes)
     if len(request.projects) > request.max_minutes:
-        raise ValueError("The budget must allow at least one minute per task.")
+        raise InputValueError("The budget must allow at least one minute per task.")
     return (
         "Draft request accepted. The draft node will generate and validate it. This request does not save any todos.",
         request.model_dump(mode="json"),

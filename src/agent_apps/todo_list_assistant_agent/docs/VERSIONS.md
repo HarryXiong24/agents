@@ -14,11 +14,11 @@ English | [简体中文](VERSIONS.zh-CN.md)
 | V6 | Custom tool-history reducer, execution records, history queries, and an `agent/` package with a central configuration entry point | Incremental State updates, runtime injection, persistence, and model access to custom state |
 | V7 | Tool observation, human approval, middleware composition, and checkpointed per-call recovery | Wrappers, `interrupt`, `Command(resume=...)`, terminal decisions, and durable tasks |
 | V8 | Structured todo drafts, business validation, checkpointed candidates, ordinary list queries and natural replies | Model JSON output versus local validation, user constraints, separate draft/saved data and fixed node dependencies |
-| V9 (current) | Basic ReAct model/tool limits and graceful turn completion within existing nodes | State counters, explicit new-turn reset, whole-batch admission, protocol pairing and completed-call semantics |
+| V9 (current) | Basic ReAct call limits, error classification, SDK-only model retries and graceful exits in existing nodes | State counters, protocol pairing, known input versus operational errors, bounded SDK retries and completed-call semantics |
 
 This document records what each version teaches, what it adds, and how to verify it. Append the same information when a future version adds another building block.
 
-The running code is **version 9**, with basic per-turn call limits and structured
+The running code is **version 9**, with basic per-turn call limits, classified errors, SDK retries and structured
 todo drafts, while ordinary replies remain natural text. Earlier versions describe learning
 history rather than separate runnable folders.
 
@@ -1400,13 +1400,14 @@ saves were undone, made the absence of an active draft explicit after replacemen
 failure, and added max_tokens truncation handling. These fixes remain in this
 learning version; the budget/retry/streaming roadmap is unchanged.
 
-## Version 9: basic per-turn call limits
+## Version 9: basic call limits and error handling
 
 ### Learning goal and scope
 
 Learn a small execution boundary using configuration, State counters and existing
 conditional routes. Keep the four registered nodes and seven tools. No preparation,
-reservation, budget or finish nodes are introduced. These checks control completed
+reservation, budget or finish nodes are introduced. Error classification and SDK-only
+model retries are included in this same version. These checks control completed
 ReAct calls, not strict HTTP attempts, token usage, elapsed time or provider cost.
 
 ### Component diagram
@@ -1418,8 +1419,8 @@ the new checks.
 ```mermaid
 flowchart TD
     U[Console: new input resets both counters] --> S[Summary node: outside counter]
-    S --> M[Model node: check count and call]
-    M -->|Tool requests| T[Tools node: check whole batch]
+    S --> M[Model node: check count, SDK request]
+    M -->|Tool requests| T[Tools node: batch check and input error handling]
     M -->|Normal reply or model limit| E[END: print final AIMessage]
     T -->|Completed ordinary batch| M
     T -->|Batch exceeds allowance: pair results and explain| E
@@ -1443,6 +1444,10 @@ flowchart TD
 | agent/graph.py | Allow the existing tools router to choose END; still four nodes |
 | console.py | Reset both totals for new input only; resumes keep checkpointed totals |
 | tests/test_budgets.py | Boundaries, no effects on rejection, new turns, pairing, approval and failure recovery |
+| agent/errors.py, memory.py and tools.py | Mark input errors; calculator business failures become errors |
+| agent/middleware.py | Known input errors become messages; operational failures and control signals propagate |
+| config/model.py and console.py | Existing SDK retry setting and final error-category advice |
+| tests/test_errors.py | Mock HTTP retries, error categories, no tool retry and write-result reuse |
 
 Read this table top to bottom, then trace a request through the existing graph.
 ModelNode and ToolsNode receive the shared AgentConfig through constructors, as
@@ -1500,6 +1505,49 @@ message in the same conversation. recursion_limit=20 remains a graph-step fallba
 not the model/tool allowance; overriding it too low can still end the console with
 GraphRecursionError. Raising budgets may require raising that fallback as well.
 
+### Error classification and SDK-owned retries
+
+These basics are part of this same learning version by user request. The graph
+still has four nodes and seven tools. Error handling does not add a retry node,
+new retry State fields, a middleware retry loop, or a graph RetryPolicy.
+
+InputValueError and InputTypeError in agent/errors.py mark explicit, correctable
+validation and retain their built-in ValueError/TypeError inheritance. The storage
+validators and tools use these types; Pydantic still wraps schema validation as
+usual. handle_tool_error formats ToolInvocationError, ValidationError and these two
+marked exceptions into error ToolMessages with field/reason details. save_todo uses
+StrictInt for minutes at the tool boundary, rejecting booleans, numeric strings and
+floats before storage validation rather than coercing them. Correcting
+arguments is a new model/tool request and is subject to the existing call limits.
+
+Calculator division by zero, nonfinite operands and overflow now raise InputValueError
+rather than returning a successful string. The observer logs error when ToolNode
+returns the handled error message. Unknown RuntimeError and unmarked ValueError or
+TypeError are not disguised as parameter errors. SQLite and disk failures propagate
+to the console and stop the run; graph approval signals still propagate to LangGraph.
+The dedicated draft node retains its local schema/business failure handling.
+
+Only the Groq SDK retries model HTTP requests, using ModelConfig.max_retries (default
+1: one retry after the first attempt). The existing model factory passes this setting
+to the shared client for ReAct, summaries and drafts. The installed SDK normally
+retries connection/timeouts, HTTP 408/409/429 and 5xx, applying its backoff and supported
+Retry-After/server overrides. Typical 400/401/403/404/422 do not retry without a server
+retry override. A malformed structured result after HTTP 200 is not an HTTP failure;
+there is no automatic schema-repair loop. Console advice distinguishes authentication,
+permission, model/endpoint, request format, rate/quota, timeout, connection and server
+errors, while retaining provider details.
+
+One successful ReAct call after SDK retries increments model_calls_this_turn once;
+exhausted attempts do not commit that node update. Summary/draft exclusions remain.
+No local tool is automatically retried. On a later restart, completed task results can
+be reused without rerunning a successful earlier write, but a write/checkpoint crash
+window can still repeat effects. This is not an exactly-once write guarantee.
+
+Read agent/errors.py, memory.py and tools.py, then middleware.handle_tool_error,
+console.describe_api_error and ModelConfig.max_retries. See tests/test_errors.py for
+real client requests through mock HTTP transport, final failure classification,
+unchanged quota semantics, and a partial-batch storage failure followed by recovery.
+
 ### Exercises
 
 1. Set max_model_calls_per_turn=1 and ask a question requiring a tool. After the
@@ -1520,25 +1568,31 @@ GraphRecursionError. Raising budgets may require raising that fallback as well.
 uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests -W error
 ```
 
-Offline suite: **208 passed**. Ruff lint/format and Pyright checks cover the application.
+Offline suite: **244 passed**. Ruff lint/format and Pyright checks cover the application.
 The new tests cover model equality boundaries, whole-batch rejection before writes
 or approval, complete message pairing, history/error counting, console new-turn resets,
 direct-caller reset requirements, restarted approvals with success or refusal, failed
-model recovery, draft/summary exclusions, and clearing a rejected draft candidate.
+model recovery, draft/summary exclusions, clearing a rejected draft candidate, classified
+errors, SDK retry success/exhaustion/nonretryable responses, completed-write reuse,
+and strict duration validation through the real tool-node path.
 Existing graph, CRUD, summaries and task-replay tests remain passing. Tests use mock
 models and temporary SQLite files, with no real credentials, network API or personal
 databases. Live provider behavior is not verified by these offline checks.
 
+Independent review found implicit Pydantic conversion of durations before the storage
+type check (for example, True becoming 1). This was corrected with StrictInt and four
+regressions proving no write occurs for True, False, "30", or 30.0 through ToolNode.
+
 ## Confirmed learning roadmap (planned)
 
 The user confirmed the following learning order on 2026-11-06. These are planned
-topics, not implemented features; versions 8 and 9 are implemented above and the
-remaining roadmap starts with version 10. Design each
-version's details before implementing it when requested by the user.
+topics, not implemented features. Basic error classification and SDK retries from
+the original version 10 proposal were merged into version 9 by user request; no
+version 10 was created. The original version 11 streaming topic remains planned.
+Any renumbering or further retry scope awaits a later user decision.
 
 | Planned version | Main topic | Intended learning scope |
 |---|---|---|
-| V10 | Error classification and retries | Distinguish argument/network/rate-limit failures, retry only suitable failures, coordinate SDK/task/middleware retry layers, and understand idempotency and duplicate writes |
 | V11 | Streaming interaction | Incrementally display model replies, tool progress, and approval events; distinguish streamed events from final State and preserved checkpoints |
 
 Continue with one main building block per version and keep both language editions,

@@ -5,13 +5,54 @@ import readline
 import sqlite3
 from collections.abc import Sequence
 
-from groq import APIError
+from groq import (
+    APIConnectionError,
+    APIError,
+    APIStatusError,
+    APITimeoutError,
+    AuthenticationError,
+    BadRequestError,
+    NotFoundError,
+    PermissionDeniedError,
+    RateLimitError,
+    UnprocessableEntityError,
+)
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.errors import GraphRecursionError
 from langgraph.types import Command, Interrupt
 
+from .agent.errors import InputTypeError, InputValueError
 from .agent.nodes.summarize import SummaryError
+
+
+def describe_api_error(error: APIError) -> str:
+    """Explain the final SDK failure without starting another retry layer."""
+    if isinstance(error, AuthenticationError):
+        return "Authentication failed. Check GROQ_API_KEY in the agent-local .env."
+    if isinstance(error, PermissionDeniedError):
+        return "Permission denied. Check your API key's access to the selected model."
+    if isinstance(error, NotFoundError):
+        return "Model or endpoint not found. Check AGENT_MODEL and GROQ_BASE_URL."
+    if isinstance(error, (BadRequestError, UnprocessableEntityError)):
+        return (
+            "The provider rejected the request. Check the model's supported request "
+            "format, tool arguments, and structured-output settings."
+        )
+    if isinstance(error, RateLimitError):
+        return "The provider rate limit or quota was reached. Wait or check your quota before trying again."
+    # APITimeoutError is also an APIConnectionError; check it first.
+    if isinstance(error, APITimeoutError):
+        return (
+            "The model request timed out. Check the connection and configured timeout."
+        )
+    if isinstance(error, APIConnectionError):
+        return "Could not connect to the model provider. Check your network and GROQ_BASE_URL."
+    if isinstance(error, APIStatusError):
+        if error.status_code >= 500:
+            return "The model provider reported a server error. Try again later."
+        return f"The provider request failed with HTTP {error.status_code}. Check its error details."
+    return "The model API request failed. Check the provider's error details."
 
 
 def select_thread(threads: list[str]) -> str | None:
@@ -169,7 +210,7 @@ def chat(graph, thread_id: str = "default") -> None:
             break
         except APIError as exc:
             print(
-                f"Assistant: This turn failed. Check your network, API key, or model settings. Details: {exc}\n"
+                f"Assistant: This turn failed. {describe_api_error(exc)} Details: {exc}\n"
             )
             break
         except sqlite3.Error as exc:
@@ -182,13 +223,16 @@ def chat(graph, thread_id: str = "default") -> None:
                 f"Assistant: Summary failed. Original messages were kept. Details: {exc}\n"
             )
             break
-        # Handle file access and explicit todo-validation errors.
-        # Unexpected exceptions propagate with their traceback for debugging.
-        except (OSError, ValueError, TypeError) as exc:
+        except OSError as exc:
             print(
-                f"Assistant: This turn failed. Check the todo storage or your input. Details: {exc}\n"
+                f"Assistant: Storage access failed. Check the data files and permissions. Details: {exc}\n"
             )
             break
+        except (InputValueError, InputTypeError) as exc:
+            print(f"Assistant: Invalid input or stored todo data. Details: {exc}\n")
+            break
+        # Generic ValueError/TypeError and other unexpected exceptions propagate
+        # with their traceback; only explicit validation errors are user-correctable.
 
     print(
         "Saved checkpoints are kept. Restart and select this conversation to continue."

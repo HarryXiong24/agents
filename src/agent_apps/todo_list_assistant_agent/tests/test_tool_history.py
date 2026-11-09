@@ -14,7 +14,6 @@ from langgraph.errors import GraphRecursionError
 
 from agent_apps.todo_list_assistant_agent.agent import memory
 from agent_apps.todo_list_assistant_agent.agent.graph import build_graph
-from agent_apps.todo_list_assistant_agent.agent.prompts import TOOL_ERROR_MESSAGE
 from agent_apps.todo_list_assistant_agent.agent.tools import get_tool_history
 from agent_apps.todo_list_assistant_agent.config import AgentConfig
 
@@ -129,7 +128,7 @@ def test_batch_records_match_each_call_and_keep_actual_results():
 @pytest.mark.parametrize("failure", ["validation", "execution", "returned_error"])
 def test_error_records_keep_the_tool_result(failure, monkeypatch):
     call = calculator_request(1)
-    expected = TOOL_ERROR_MESSAGE
+    expected = "operation"
     if failure == "validation":
         call["args"]["operation"] = "invalid"
     elif failure == "execution":
@@ -143,13 +142,19 @@ def test_error_records_keep_the_tool_result(failure, monkeypatch):
         )
     else:
         call["args"].update(b=0, operation="divide")
-        expected = "Cannot calculate: the divisor must not be zero. Check the numbers or explain the issue."
+        expected = "divisor must not be zero"
     model = make_model(
         AIMessage(content="", tool_calls=[call]), AIMessage(content="Cannot proceed.")
     )
+    if failure == "execution":
+        with pytest.raises(OSError, match="Disk error"):
+            build_graph(model).invoke({"messages": [HumanMessage("Run this tool.")]})
+        model.invoke.assert_called_once()
+        return
     result = build_graph(model).invoke({"messages": [HumanMessage("Run this tool.")]})
     assert result["tool_history"][0]["tool_args"] == call["args"]
-    assert result["tool_history"][0]["result"] == expected
+    assert expected in result["tool_history"][0]["result"]
+    assert result["messages"][2].status == "error"
     assert result["tool_history"][0]["result"] == result["messages"][2].text
     assert memory.load_todos() == []
 

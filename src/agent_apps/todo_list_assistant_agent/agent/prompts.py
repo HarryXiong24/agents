@@ -12,8 +12,8 @@ SYSTEM_PROMPT = (
     (PROMPT_TEMPLATES_DIR / "system_prompt.md").read_text(encoding="utf-8").strip()
 )
 
-# Return this instruction to the model when a tool fails.
-TOOL_ERROR_MESSAGE = "Tool execution failed. Check the arguments and retry, or explain the issue to the user."
+# Prefix known, correctable tool input errors; operational failures propagate.
+TOOL_ERROR_MESSAGE = "Tool input is invalid. Check the arguments before calling again, or explain the issue to the user."
 TODO_LIST_PROMPT = (
     (PROMPT_TEMPLATES_DIR / "todo_list_prompt.md").read_text(encoding="utf-8").strip()
 )

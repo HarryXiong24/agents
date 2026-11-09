@@ -5,20 +5,36 @@ from time import perf_counter
 
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphBubbleUp
-from langgraph.prebuilt.tool_node import ToolCallRequest
+from langgraph.prebuilt.tool_node import ToolCallRequest, ToolInvocationError
 from langgraph.types import Command, interrupt
+from pydantic import ValidationError
 
 from ..config import agent as agent_settings
+from .errors import InputTypeError, InputValueError
 from .prompts import TOOL_ERROR_MESSAGE
 
 
 def handle_tool_error(error: Exception) -> str:
-    """Preserve graph control signals while formatting ordinary tool errors."""
+    """Explain known input errors; propagate control signals, storage errors and bugs."""
     # ToolNode also catches exceptions raised by wrappers. An interrupt must reach
     # LangGraph so it can checkpoint the pending approval instead of reporting failure.
     if isinstance(error, GraphBubbleUp):
         raise error
-    return TOOL_ERROR_MESSAGE
+    if isinstance(error, ToolInvocationError):
+        # ToolNode already filters injected runtime/State fields out of this error.
+        detail = str(error)
+    elif isinstance(error, ValidationError):
+        detail = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
+            for item in error.errors()
+        )
+    elif isinstance(error, (InputValueError, InputTypeError)):
+        detail = str(error)
+    else:
+        # In particular, never turn a database failure into an instruction to
+        # retry a write, or hide a programmer's generic TypeError/ValueError.
+        raise error
+    return f"{TOOL_ERROR_MESSAGE} Details: {detail}"
 
 
 def approve_tool_call(

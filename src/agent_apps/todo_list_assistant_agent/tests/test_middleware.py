@@ -107,7 +107,8 @@ def test_graph_observes_each_call_and_preserves_history(tmp_path, monkeypatch, c
         history = result["tool_history"]
         assert len(history) == 3
         assert history[0]["result"] == "3.0"
-        assert history[1]["result"] == TOOL_ERROR_MESSAGE
+        assert history[1]["result"].startswith(TOOL_ERROR_MESSAGE)
+        assert "operation" in history[1]["result"]
         assert "divisor must not be zero" in history[2]["result"]
         assert all(
             set(record) == {"tool_name", "tool_args", "result", "timestamp"}
@@ -128,7 +129,7 @@ def test_graph_observes_each_call_and_preserves_history(tmp_path, monkeypatch, c
     for call_id, status in (
         ("normal", "success"),
         ("invalid", "error"),
-        ("business-error", "success"),
+        ("business-error", "error"),
         ("lookup", "success"),
     ):
         assert output.count(f"id={call_id}, status={status}, elapsed=") == 1

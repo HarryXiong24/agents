@@ -7,6 +7,7 @@ from datetime import date as calendar_date
 from typing import TypedDict
 
 from ..config import DATA_DIR
+from .errors import InputTypeError, InputValueError
 
 # Resolve data files from application configuration, independent of this module.
 DATABASE_FILE = DATA_DIR / "todos.sqlite"
@@ -23,21 +24,21 @@ class TodoItem(TypedDict):
 def _validate_todo_key(project: str, scheduled_date: str) -> tuple[str, str]:
     """Project and date identify a todo; reads and writes share this validation."""
     if not isinstance(project, str):
-        raise TypeError("The todo name must be a string.")
+        raise InputTypeError("The todo name must be a string.")
     project = project.strip()
     if not project:
-        raise ValueError("The todo name must not be empty.")
+        raise InputValueError("The todo name must not be empty.")
     if not isinstance(scheduled_date, str):
-        raise TypeError("The scheduled date must be a string.")
+        raise InputTypeError("The scheduled date must be a string.")
     try:
         parsed_date = calendar_date.fromisoformat(scheduled_date)
     except ValueError as exc:
-        raise ValueError(
+        raise InputValueError(
             "The scheduled date must be a valid date in YYYY-MM-DD format."
         ) from exc
     # fromisoformat accepts other ISO forms; require the full calendar date here.
     if parsed_date.isoformat() != scheduled_date:
-        raise ValueError("The scheduled date must use YYYY-MM-DD format.")
+        raise InputValueError("The scheduled date must use YYYY-MM-DD format.")
     return project, scheduled_date
 
 
@@ -45,9 +46,9 @@ def _validate_todo(project: str, minutes: int, scheduled_date: str) -> TodoItem:
     """Use TypeError for invalid types and ValueError for invalid values."""
     project, scheduled_date = _validate_todo_key(project, scheduled_date)
     if type(minutes) is not int:
-        raise TypeError("Estimated duration must be an integer number of minutes.")
+        raise InputTypeError("Estimated duration must be an integer number of minutes.")
     if not 1 <= minutes <= 1440:
-        raise ValueError("Estimated duration must be between 1 and 1440 minutes.")
+        raise InputValueError("Estimated duration must be between 1 and 1440 minutes.")
     return {"project": project, "minutes": minutes, "date": scheduled_date}
 
 

@@ -19,7 +19,6 @@ from agent_apps.todo_list_assistant_agent import console
 from agent_apps.todo_list_assistant_agent import main as app
 from agent_apps.todo_list_assistant_agent.agent import checkpoints, memory, middleware
 from agent_apps.todo_list_assistant_agent.agent.graph import build_graph
-from agent_apps.todo_list_assistant_agent.agent.prompts import TOOL_ERROR_MESSAGE
 from agent_apps.todo_list_assistant_agent.config import AgentConfig
 from agent_apps.todo_list_assistant_agent.config import agent as agent_settings
 from agent_apps.todo_list_assistant_agent.config import app as app_config
@@ -135,7 +134,8 @@ def test_tool_error_handler_preserves_interrupts():
     with pytest.raises(GraphInterrupt) as caught:
         middleware.handle_tool_error(signal)
     assert caught.value is signal
-    assert middleware.handle_tool_error(OSError("Disk failure")) == TOOL_ERROR_MESSAGE
+    with pytest.raises(OSError, match="Disk failure"):
+        middleware.handle_tool_error(OSError("Disk failure"))
 
 
 def test_approval_can_be_explicitly_disabled_in_shared_config(monkeypatch):

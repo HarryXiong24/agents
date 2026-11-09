@@ -18,6 +18,10 @@ from langgraph.types import Command
 from agent_apps.todo_list_assistant_agent import config, console
 from agent_apps.todo_list_assistant_agent import main as app
 from agent_apps.todo_list_assistant_agent.agent import checkpoints, memory
+from agent_apps.todo_list_assistant_agent.agent.errors import (
+    InputTypeError,
+    InputValueError,
+)
 from agent_apps.todo_list_assistant_agent.agent.graph import build_graph
 from agent_apps.todo_list_assistant_agent.agent.tools import (
     calculate,
@@ -75,15 +79,12 @@ def test_calculate(operation, expected):
 
 
 def test_invalid_numbers_and_zero_division():
-    assert "divisor must not be zero" in calculate.invoke(
-        {"a": 1, "b": 0, "operation": "divide"}
-    )
-    assert "finite numbers" in calculate.invoke(
-        {"a": float("inf"), "b": 1, "operation": "add"}
-    )
-    assert "outside" in calculate.invoke(
-        {"a": 1e308, "b": 1e308, "operation": "multiply"}
-    )
+    with pytest.raises(InputValueError, match="divisor must not be zero"):
+        calculate.invoke({"a": 1, "b": 0, "operation": "divide"})
+    with pytest.raises(InputValueError, match="finite numbers"):
+        calculate.invoke({"a": float("inf"), "b": 1, "operation": "add"})
+    with pytest.raises(InputValueError, match="outside"):
+        calculate.invoke({"a": 1e308, "b": 1e308, "operation": "multiply"})
 
 
 def test_current_time():
@@ -156,7 +157,8 @@ def test_tool_validation_error_returns_to_model():
     tool_result = result["messages"][2]
     assert isinstance(tool_result, ToolMessage)
     assert tool_result.status == "error"
-    assert "Tool execution failed" in tool_result.content
+    assert "Tool input is invalid" in tool_result.content
+    assert "operation" in tool_result.content
     assert model.invoke.call_count == 2
 
 
@@ -214,8 +216,8 @@ def test_console_keeps_failed_turn_and_resumes_before_new_input(
     "error",
     [
         OSError("Read failed"),
-        ValueError("Invalid todo value"),
-        TypeError("Invalid todo type"),
+        InputValueError("Invalid todo value"),
+        InputTypeError("Invalid todo type"),
     ],
 )
 def test_console_handles_expected_data_errors(monkeypatch, capsys, error):
@@ -224,14 +226,20 @@ def test_console_handles_expected_data_errors(monkeypatch, capsys, error):
     inputs = iter(["Please read my todos", "exit"])
     monkeypatch.setattr("builtins.input", lambda _: next(inputs))
     console.chat(graph)
-    assert "Check the todo storage or your input" in capsys.readouterr().out
+    expected = (
+        "Storage access failed"
+        if isinstance(error, OSError)
+        else "Invalid input or stored todo data"
+    )
+    assert expected in capsys.readouterr().out
 
 
-def test_console_propagates_unexpected_error(monkeypatch):
+@pytest.mark.parametrize("error_type", [RuntimeError, ValueError, TypeError])
+def test_console_propagates_unexpected_error(monkeypatch, error_type):
     graph = make_idle_graph()
-    graph.invoke.side_effect = RuntimeError("Simulated programming error")
+    graph.invoke.side_effect = error_type("Simulated programming error")
     monkeypatch.setattr("builtins.input", lambda _: "Hello")
-    with pytest.raises(RuntimeError, match="programming error"):
+    with pytest.raises(error_type, match="programming error"):
         console.chat(graph)
 
 
@@ -387,10 +395,15 @@ def test_failed_save_does_not_report_success(monkeypatch, capsys):
         ),
         AIMessage(content="Saving failed. Please try again later."),
     )
-    result = build_graph(model).invoke(
-        {"messages": [HumanMessage("Save a 30-minute Python todo for 2026-10-29.")]},
-    )
-    assert result["messages"][2].status == "error"
+    with pytest.raises(OSError, match="disk write failure"):
+        build_graph(model).invoke(
+            {
+                "messages": [
+                    HumanMessage("Save a 30-minute Python todo for 2026-10-29.")
+                ]
+            },
+        )
+    model.invoke.assert_called_once()
     assert "Saved" not in capsys.readouterr().out
     assert memory.load_todos() == []
 
@@ -506,10 +519,13 @@ def test_delete_errors_do_not_report_success(
     graph = build_graph(model, checkpointer)
     config: RunnableConfig = {"configurable": {"thread_id": "failed-delete"}}
     paused = graph.invoke({"messages": [HumanMessage("Delete this todo.")]}, config)
-    result = graph.invoke(
-        Command(resume={paused["__interrupt__"][0].id: {"approved": True}}),
-        config,
-    )
-    assert result["messages"][2].status == "error"
+    resume = Command(resume={paused["__interrupt__"][0].id: {"approved": True}})
+    if missing_date:
+        result = graph.invoke(resume, config)
+        assert result["messages"][2].status == "error"
+    else:
+        with pytest.raises(OSError, match="delete write failure"):
+            graph.invoke(resume, config)
+        model.invoke.assert_called_once()
     assert "Deleted" not in capsys.readouterr().out
     assert memory.load_todos() == [saved]
