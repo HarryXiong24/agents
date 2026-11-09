@@ -13,6 +13,10 @@ class AgentConfig:
     summary_keep_turns: int = 2
     # Limit graph steps per invocation, including summary, model, tools, and draft.
     recursion_limit: int = 20
+    # Completed calls to the ReAct model node; summaries and drafts are excluded.
+    max_model_calls_per_turn: int = 6
+    # Individual requests handled by completed tool batches, not batch count.
+    max_tool_calls_per_turn: int = 8
     # Retain this many recent tool executions in each conversation's State.
     tool_history_limit: int = 10
     # Pause these tools before execution; the console supplies approval decisions.

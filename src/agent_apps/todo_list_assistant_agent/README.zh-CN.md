@@ -137,7 +137,7 @@ Assistant: That is 315 minutes, or 5.25 hours.
 
 新建 `work-todos` 会使用另一段独立的历史。每次启动都由菜单选择，不需要记住或传入 ID。编号只是本次菜单的位置，会话名称才是数据库中稳定的标识。
 
-终端每轮只传入新的 `HumanMessage`。`AgentState` 在 `MessagesState` 基础上声明可选的 `summary`、`tool_history` 和 `todo_draft` 字段，Checkpointer 将它们与近期用户消息、模型回复、工具请求和工具结果一起保存。
+终端每轮传入新的 `HumanMessage` 并重置两个用量计数。`AgentState` 在 `MessagesState` 基础上声明可选的 `summary`、`tool_history`、`todo_draft`、`model_calls_this_turn` 和 `tool_calls_this_turn` 字段，Checkpointer 将它们与近期用户消息、模型回复、工具请求和工具结果一起保存。
 
 ## 生成待办安排草案
 
@@ -192,12 +192,38 @@ Not saved. Ask to save this draft if you want to keep it.
 工具历史记录的是草案请求工具的结果，生成／检查结果位于 State 和消息中。
 既有待办、聊天消息和数据路径保留。
 
+## 每轮模型与工具次数限制
+
+在 `config/agent.py` 修改 `AgentConfig.max_model_calls_per_turn`（默认 6）和
+`max_tool_calls_per_turn`（默认 8）后重启。图仍只有四个节点，检查直接写在现有 model／tools 方法中。
+
+模型节点调用 ReAct 主模型前检查 `model_calls_this_turn`，调用成功后才返回加一的总数。
+达到上限就返回一条固定 AIMessage，现有路由直接进入 END，不额外调用模型。
+摘要生成和结构化草案模型不计入这个模型计数。这是已完成调用次数限制，
+不是 HTTP 尝试、token、耗时或费用上限；节点返回前的失败和 SDK 内部重试不会增加计数。
+
+工具节点执行任务或发起审批前检查整批请求。额度内的批次在节点完成时按单个请求计数，
+包括已处理错误、人工拒绝、非法混合草案批次和历史查询；历史查询依然不生成工具历史记录。
+整批超过剩余额度就全部拒绝，不增加用量。为每个请求补齐一条错误 ToolMessage，
+再由代码返回一条最终回复，工具路由进入 END。拒绝结果计入工具历史，历史查询除外。
+之前保存的待办和已完成结果保留；被拒绝的新草案请求会清空旧候选，与其他替换失败保持一致。
+
+终端每次收到非空新用户消息时，把两个计数一起设为零。审批和失败恢复不传计数，
+保留检查点中的用量。工具批次暂停时尚未返回计数；恢复后复用已完成的 @task 结果，
+整批节点完成时只统计一次。计数按会话保存，不放在节点实例属性中。
+直接调用图时，新轮次必须像下方示例一样显式传入两个零；单独传入新 HumanMessage 不会自动重置。
+旧检查点缺少字段时按零处理，无需迁移。
+
+正常达到次数上限只结束当前轮，终端仍可继续接受输入。`recursion_limit=20` 保留为独立的图步数兜底；
+把它调得太低仍可能触发 GraphRecursionError 并结束终端会话。
+不新增预算、额度预留、准备或结束节点。
+
 ## 滚动对话摘要
 
 每个新用户轮次第一次调用模型之前，摘要节点估算“已有摘要＋消息历史”的 token 数。达到配置阈值后，用“旧摘要＋较早的完整对话”生成新摘要，原样保留最近 **2 个完整用户轮次＋当前轮**。一轮包含工具请求、工具结果和最终回答，并不是一条消息。
 
 修改 `config/agent.py` 的 `AgentConfig` 后重启。Agent 参数直接写在 Python 中，
-`.env` 只保存模型配置；下面四个数值参数都应使用正整数，
+`.env` 只保存模型配置；下面六个数值参数都应使用正整数，
 `approval_tools` 指定需要人工审批的工具：
 
 ```python
@@ -206,6 +232,8 @@ class AgentConfig:
     summary_trigger_tokens: int = 500
     summary_keep_turns: int = 2
     recursion_limit: int = 20
+    max_model_calls_per_turn: int = 6
+    max_tool_calls_per_turn: int = 8
     tool_history_limit: int = 10
     approval_tools: tuple[str, ...] = ("delete_todo",)
 ```
@@ -252,7 +280,7 @@ Context: Earlier conversation summarized; recent turns kept.
 图为四个节点、七个工具。工具历史使用已有检查点数据库，没有独立的表；
 保留条数由 `AgentConfig.tool_history_limit` 配置，默认十条；
 `tools()` 包装 `ToolNode` 来生成记录。图的 `recursion_limit` 默认是 `20`，
-没有独立的工具调用次数预算。工具历史由节点生成；下面的观察中间件负责向终端输出执行信息。
+同时受前述已完成调用次数限制。工具历史由节点生成；下面的观察中间件负责向终端输出执行信息。
 
 调小 `tool_history_limit` 后，新上限在下一次工具节点更新合并时生效。
 恢复检查点本身不会执行 reducer，因此此前保存的记录可能暂时超过新上限，
@@ -428,7 +456,11 @@ todo_list_assistant_agent/
 ```python
 graph = build_graph(model, checkpointer=checkpointer)
 result = graph.invoke(
-    {"messages": [HumanMessage(text)]},
+    {
+        "messages": [HumanMessage(text)],
+        "model_calls_this_turn": 0,
+        "tool_calls_this_turn": 0,
+    },
     config=config,
 )
 ```
@@ -471,7 +503,7 @@ result = graph.invoke(
 `main.py` 打开 Saver，通过 `threads = checkpoints.list_threads(checkpointer)` 获取普通列表，再交给 `console.py` 的 `select_thread(threads)`。菜单不访问数据库；`agent/checkpoints.py` 集中管理 `CHECKPOINTS_FILE` 和会话查询 SQL，`console.py` 管理 `select_thread()` 和 `chat()`。入口直接进入会话列表，不解析命令行参数。
 
 `config/` 按三类职责拆分：`agent.py` 定义 `AgentConfig`，统一管理摘要参数、
-图执行步数、工具历史条数与审批工具名单；`model.py` 定义和解析 `ModelConfig`；`app.py` 管理路径、
+图执行步数、每轮调用上限、工具历史条数与审批工具名单；`model.py` 定义和解析 `ModelConfig`；`app.py` 管理路径、
 `AppConfig`、唯一的 `read_env()` 和 `load_config()` 组装逻辑。`.env` 只提供模型配置，
 `config/agent.py` 只创建一份共享的 `AGENT_CONFIG = AgentConfig()`，
 `load_config()` 将同一个对象呈现为 `settings.agent`；图和 reducer 直接读取这份配置。
@@ -510,4 +542,4 @@ token 阈值、完整轮次保留和 `RemoveMessage`。结构图、阅读顺序�
 uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests
 ```
 
-测试使用模拟模型、临时配置文件和临时数据库，不需要真实密钥或网络。覆盖依赖一次性绑定、共享节点对象下的会话隔离、依赖不写入检查点、配置隔离、触发阈值、滚动摘要、工具配对、摘要失败恢复、跨进程恢复、待办工具中断恢复、工具记录数量限制、只读历史查询、runtime 注入、摘要后的工具记录保留、待办增删改查、中文输入和存储，工具观察、批准／拒绝、终端退出后续审、多次顺序审批，跨进程复用已完成任务、请求／schema 校验、草案业务检查、单次回复、重启恢复、明确保存、JSON mode 请求、普通查询与自然回复持久化。
+测试使用模拟模型、临时配置文件和临时数据库，不需要真实密钥或网络。覆盖依赖一次性绑定、共享节点对象下的会话隔离、依赖不写入检查点、配置隔离、触发阈值、滚动摘要、工具配对、摘要失败恢复、跨进程恢复、待办工具中断恢复、工具记录数量限制、只读历史查询、runtime 注入、摘要后的工具记录保留、待办增删改查、中文输入和存储，工具观察、批准／拒绝、终端退出后续审、多次顺序审批，跨进程复用已完成任务、请求／schema 校验、草案业务检查、单次回复、重启恢复、明确保存、JSON mode 请求、普通查询、自然回复持久化、模型／工具上限、整批拒绝、新轮次重置与审批／失败恢复时的用量保留。

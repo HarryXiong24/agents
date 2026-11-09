@@ -172,15 +172,36 @@ def test_history_appends_across_turns_and_keeps_only_latest_ten(tmp_path):
     config: RunnableConfig = {"configurable": {"thread_id": "history-limit"}}
     with SqliteSaver.from_conn_string(str(tmp_path / "checkpoints.sqlite")) as saver:
         graph = build_graph(model, saver)
-        first = graph.invoke({"messages": [HumanMessage("First batch.")]}, config)
+        first = graph.invoke(
+            {
+                "messages": [HumanMessage("First batch.")],
+                "model_calls_this_turn": 0,
+                "tool_calls_this_turn": 0,
+            },
+            config,
+        )
         assert len(first["tool_history"]) == 8
-        result = graph.invoke({"messages": [HumanMessage("Second batch.")]}, config)
+        result = graph.invoke(
+            {
+                "messages": [HumanMessage("Second batch.")],
+                "model_calls_this_turn": 0,
+                "tool_calls_this_turn": 0,
+            },
+            config,
+        )
         assert [record["tool_args"]["a"] for record in result["tool_history"]] == list(
             range(3, 13)
         )
         assert graph.get_state(config).values["tool_history"] == result["tool_history"]
         assert len(first["tool_history"]) == 8
-        queried = graph.invoke({"messages": [HumanMessage("Show history.")]}, config)
+        queried = graph.invoke(
+            {
+                "messages": [HumanMessage("Show history.")],
+                "model_calls_this_turn": 0,
+                "tool_calls_this_turn": 0,
+            },
+            config,
+        )
         assert json.loads(queried["messages"][-2].text) == result["tool_history"]
         # Looking up a full history does not consume one of its ten slots.
         assert queried["tool_history"] == result["tool_history"]

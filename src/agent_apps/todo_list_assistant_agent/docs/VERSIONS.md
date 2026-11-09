@@ -13,19 +13,20 @@ English | [简体中文](VERSIONS.zh-CN.md)
 | V5 | Rolling summaries, configurable token threshold, local configuration, and Todo naming/storage | Context compression, complete turns, and `RemoveMessage` |
 | V6 | Custom tool-history reducer, execution records, history queries, and an `agent/` package with a central configuration entry point | Incremental State updates, runtime injection, persistence, and model access to custom state |
 | V7 | Tool observation, human approval, middleware composition, and checkpointed per-call recovery | Wrappers, `interrupt`, `Command(resume=...)`, terminal decisions, and durable tasks |
-| V8 (current) | Structured todo drafts, business validation, checkpointed candidates, ordinary list queries and natural replies | Model JSON output versus local validation, user constraints, separate draft/saved data and fixed node dependencies |
+| V8 | Structured todo drafts, business validation, checkpointed candidates, ordinary list queries and natural replies | Model JSON output versus local validation, user constraints, separate draft/saved data and fixed node dependencies |
+| V9 (current) | Basic ReAct model/tool limits and graceful turn completion within existing nodes | State counters, explicit new-turn reset, whole-batch admission, protocol pairing and completed-call semantics |
 
 This document records what each version teaches, what it adds, and how to verify it. Append the same information when a future version adds another building block.
 
-The running code is **version 8**, generating and validating structured todo drafts
-while ordinary replies remain natural text. Earlier versions describe learning
+The running code is **version 9**, with basic per-turn call limits and structured
+todo drafts, while ordinary replies remain natural text. Earlier versions describe learning
 history rather than separate runnable folders.
 
 Code, prompts, tool descriptions, and terminal messages use English. The assistant replies in English by default, with another language available on explicit request. Exit with `exit` or `quit`.
 
-Current Agent execution and persistence modules live under `agent/`, with startup, console, and shared configuration at the application root. Earlier sections retain their historical paths; use the current README layout and version 8's `agent/nodes/` modules when navigating source.
+Current Agent execution and persistence modules live under `agent/`, with startup, console, and shared configuration at the application root. Earlier sections retain their historical paths; use the current README layout and version 9's `agent/nodes/` modules when navigating source.
 
-Diagrams show components and data flow. Versions 1-4 have **Model node** and **Tool node**; version 5 adds **Summary node**. Version 6 keeps those three nodes and adds custom state processing inside the tools step. Version 7 adds wrappers inside `ToolNode` without adding nodes; version 8 adds a fourth draft node for structured generation and validation. Storage helpers
+Diagrams show components and data flow. Versions 1-4 have **Model node** and **Tool node**; version 5 adds **Summary node**. Version 6 keeps those three nodes and adds custom state processing inside the tools step. Version 7 adds wrappers inside `ToolNode` without adding nodes; version 8 adds a fourth draft node for structured generation and validation; version 9 keeps those four nodes and adds internal call-limit checks. Storage helpers
 and the console are ordinary Python functions.
 
 ## Version 1: console chat and minimal ReAct
@@ -1384,7 +1385,7 @@ existing data is not deleted or migrated.
 uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests -W error
 ```
 
-Current offline suite: **196 passed**. Ruff lint/format and Pyright checks are run
+Offline suite at this version's final review: **196 passed**. Ruff lint/format and Pyright checks are run
 against the application. Tests cover ordinary queries, record/request constraints,
 JSON-mode HTTP request shape through the real Groq wrapper with a mock transport,
 business rejection, parser/truncation failures, no implicit writes, mixed batches,
@@ -1399,16 +1400,144 @@ saves were undone, made the absence of an active draft explicit after replacemen
 failure, and added max_tokens truncation handling. These fixes remain in this
 learning version; the budget/retry/streaming roadmap is unchanged.
 
+## Version 9: basic per-turn call limits
+
+### Learning goal and scope
+
+Learn a small execution boundary using configuration, State counters and existing
+conditional routes. Keep the four registered nodes and seven tools. No preparation,
+reservation, budget or finish nodes are introduced. These checks control completed
+ReAct calls, not strict HTTP attempts, token usage, elapsed time or provider cost.
+
+### Component diagram
+
+Only summarize/model/tools/draft are registered nodes. Console input and State
+are components, not additional graph nodes. Highlighted model/tools nodes contain
+the new checks.
+
+```mermaid
+flowchart TD
+    U[Console: new input resets both counters] --> S[Summary node: outside counter]
+    S --> M[Model node: check count and call]
+    M -->|Tool requests| T[Tools node: check whole batch]
+    M -->|Normal reply or model limit| E[END: print final AIMessage]
+    T -->|Completed ordinary batch| M
+    T -->|Batch exceeds allowance: pair results and explain| E
+    T -->|Accepted draft request| D[Draft node: outside model counter]
+    D --> E
+    M -. completed model total .-> C[State and SQLite Checkpointer]
+    T -. completed batch total .-> C
+    C -. restore same turn on approval or failure .-> T
+    classDef changed fill:#fff3df,stroke:#c76a00,stroke-width:2px;
+    class U,M,T,C changed;
+```
+
+### Components and reading order
+
+| Component | Change |
+|---|---|
+| config/agent.py | max_model_calls_per_turn=6 and max_tool_calls_per_turn=8 |
+| agent/state.py | Optional model_calls_this_turn and tool_calls_this_turn; plain replacement fields |
+| agent/nodes/model.py | Check before calling; count successful returns; generate a fixed stop message |
+| agent/nodes/tools.py | Check whole batches, pair declined requests, record history, count once on completion |
+| agent/graph.py | Allow the existing tools router to choose END; still four nodes |
+| console.py | Reset both totals for new input only; resumes keep checkpointed totals |
+| tests/test_budgets.py | Boundaries, no effects on rejection, new turns, pairing, approval and failure recovery |
+
+Read this table top to bottom, then trace a request through the existing graph.
+ModelNode and ToolsNode receive the shared AgentConfig through constructors, as
+SummarizeNode already does. Limits belong to configuration; used totals belong to
+State. There is no counter reducer or shared mutable node-instance counter.
+
+### Model count and controlled exit
+
+The model method reads state.get("model_calls_this_turn", 0). If it is already at
+the configured limit, it returns one code-generated AIMessage. That message has no
+tool calls, so the existing model router goes to END. Otherwise it invokes the
+ReAct model and returns used+1 together with the generated message. Equality allows
+the last configured call to complete; the next attempted call is declined.
+
+Only successful returns from the model node count. The summarize and draft nodes
+are excluded, including a summary attempt skipped after generation because it did
+not shorten history. A draft-request tool still uses one tool slot and its initial
+ReAct decision uses one model slot. Failures before a node returns and SDK retries
+are not counted. State and side effects are not an exactly-once network ledger.
+
+### Tool count and message pairing
+
+Before any task or approval begins, the tools method compares used + batch size
+with max_tool_calls_per_turn. If the batch fits, one slot per request is counted
+when the whole node completes. Handled errors, human refusals, rejected mixed draft
+batches and get_tool_history calls are included. History lookups are still excluded
+from tool_history records; usage count and retained history are different concepts.
+
+If the batch does not fit, no requests in it execute and usage stays unchanged.
+The node returns one error ToolMessage per call, records the refusals except for
+history lookups, then appends one fixed AIMessage. route_after_tools sees that final
+AIMessage and returns END, with no additional model call. Earlier completed work and
+saved todos remain. A declined replacement draft clears the old candidate as other
+replacement failures do. This is all-or-none admission, not a transaction for batches
+that do execute; ordinary per-record saves can still partially succeed.
+
+### New turns and checkpoint recovery
+
+The console sends a new HumanMessage with both counters set to zero. This resets
+allowances while preserving messages, summary, draft and tool_history. Blank input,
+exit and approval answers do not create new user turns. An API caller must supply
+the same zeros for each new turn; a new HumanMessage alone does not reset State.
+The README direct-call example includes these fields.
+
+Command(resume=...) and invoke(None) omit counters. During a paused tool batch its
+count has not been committed yet, even if some tasks completed. Restoring that batch
+reuses cached task results and writes its total once on node completion. A failed
+model call likewise writes no increment until its successful resumed completion.
+Older checkpoints missing counters start from zero; past usage is not reconstructed.
+The simple design assumes unchanged limits while completing a paused batch and does
+not provide durable per-attempt reservations or a strict bound on failed retries.
+
+Normal budget stops leave snapshot.next empty, so the console accepts another
+message in the same conversation. recursion_limit=20 remains a graph-step fallback,
+not the model/tool allowance; overriding it too low can still end the console with
+GraphRecursionError. Raising budgets may require raising that fallback as well.
+
+### Exercises
+
+1. Set max_model_calls_per_turn=1 and ask a question requiring a tool. After the
+   tool result, observe the fixed stop message instead of a second model call.
+2. Set max_tool_calls_per_turn=1 and request a multi-step calculation. Observe whole
+   batch rejection when a later request no longer fits. Tool selection is model-dependent.
+3. Inspect both counters and compare tool_calls_this_turn with retained tool_history.
+4. Send another message and observe zero-based counting for the new turn.
+5. Pause approval after an earlier task in the batch, restart, and verify cached
+   results are reused and the completed batch is counted once.
+6. Read test_failed_model_call_is_not_counted_until_completed_on_resume to understand
+   why completed-call counting is not an HTTP request limit.
+7. Follow a budget rejection through paired ToolMessages to the tools router's END.
+
+### Verification
+
+```bash
+uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests -W error
+```
+
+Offline suite: **208 passed**. Ruff lint/format and Pyright checks cover the application.
+The new tests cover model equality boundaries, whole-batch rejection before writes
+or approval, complete message pairing, history/error counting, console new-turn resets,
+direct-caller reset requirements, restarted approvals with success or refusal, failed
+model recovery, draft/summary exclusions, and clearing a rejected draft candidate.
+Existing graph, CRUD, summaries and task-replay tests remain passing. Tests use mock
+models and temporary SQLite files, with no real credentials, network API or personal
+databases. Live provider behavior is not verified by these offline checks.
+
 ## Confirmed learning roadmap (planned)
 
 The user confirmed the following learning order on 2026-11-06. These are planned
-topics, not implemented features; version 8 is implemented above and the remaining
-roadmap starts with version 9. Design each
+topics, not implemented features; versions 8 and 9 are implemented above and the
+remaining roadmap starts with version 10. Design each
 version's details before implementing it when requested by the user.
 
 | Planned version | Main topic | Intended learning scope |
 |---|---|---|
-| V9 | Execution budgets and controlled exit | Per-turn model/tool call limits, counters in State, reset on a new user turn, preserve budgets through HITL/task replay, and finish with complete tool-result pairing |
 | V10 | Error classification and retries | Distinguish argument/network/rate-limit failures, retry only suitable failures, coordinate SDK/task/middleware retry layers, and understand idempotency and duplicate writes |
 | V11 | Streaming interaction | Incrementally display model replies, tool progress, and approval events; distinguish streamed events from final State and preserved checkpoints |
 

@@ -119,10 +119,15 @@ def chat(graph, thread_id: str = "default") -> None:
                 if not text:
                     continue
 
-                # Send only the new message. MessagesState merges it with the
-                # history restored by the checkpointer for this thread_id.
+                # A new user message starts a new allowance. Resumes above omit
+                # counters, retaining the same turn's checkpointed usage.
+                # MessagesState merges this new message with restored history.
                 result = graph.invoke(
-                    {"messages": [HumanMessage(text)]},
+                    {
+                        "messages": [HumanMessage(text)],
+                        "model_calls_this_turn": 0,
+                        "tool_calls_this_turn": 0,
+                    },
                     config=config,
                 )
 

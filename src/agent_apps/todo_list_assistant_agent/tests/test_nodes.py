@@ -103,6 +103,8 @@ def test_tool_runtime_and_checkpoints_do_not_contain_node_dependencies(
             "messages",
             "summary",
             "tool_history",
+            "model_calls_this_turn",
+            "tool_calls_this_turn",
         }
         lookup = next(
             message

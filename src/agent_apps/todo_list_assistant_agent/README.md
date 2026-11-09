@@ -139,7 +139,7 @@ Start `uv run todo-list-assistant-agent`, choose `0`, name the conversation `hom
 
 Create another conversation named `work-todos` for separate history. Startup always asks you to choose; you do not need to remember or pass an ID. Displayed numbers are temporary menu positions, while the saved conversation names remain stable.
 
-The console sends only the new `HumanMessage`. `AgentState` extends `MessagesState` with optional `summary`, `tool_history`, and `todo_draft` fields. The checkpointer saves them together with recent user messages, model replies, tool requests, and tool results.
+The console sends the new `HumanMessage` and resets the two usage counters. `AgentState` extends `MessagesState` with optional `summary`, `tool_history`, `todo_draft`, `model_calls_this_turn`, and `tool_calls_this_turn` fields. The checkpointer saves them together with recent user messages, model replies, tool requests, and tool results.
 
 ## Todo arrangement drafts
 
@@ -207,12 +207,48 @@ requests still use observation, optional approval and checkpointed tasks. Tool h
 records the draft-request tool result; generation/check results live in State/messages.
 Saved todos, existing messages and database locations are preserved.
 
+## Per-turn model and tool limits
+
+Edit `AgentConfig.max_model_calls_per_turn` (default 6) and
+`max_tool_calls_per_turn` (default 8) in `config/agent.py`, then restart.
+The graph still has four nodes; checks live in the existing model/tools methods.
+
+The model node checks `model_calls_this_turn` before invoking the ReAct model and
+returns the incremented total only after a successful call. At the limit it returns
+one fixed AIMessage, whose existing route goes to END without another model call.
+Summary generation and the structured draft model are outside this model counter.
+This is a completed-call limit, not an HTTP-attempt, token, time or cost limit.
+Failures before a node returns and SDK retries do not increment it.
+
+The tools node checks the whole batch before executing tasks or asking for approval.
+A batch that fits counts one per request when the node completes, including handled
+errors, approval rejections, invalid mixed draft batches and history lookups. History
+lookups still do not create tool-history records. A batch that exceeds the remaining
+allowance is entirely declined without increasing usage; one error ToolMessage per
+request completes the protocol, followed by one code-generated final reply. The tools
+router then goes to END. Declines appear in tool history except for history lookups.
+Earlier saved todos and completed results are kept. A declined replacement draft
+request clears the old candidate, consistent with other replacement failures.
+
+The console resets both counters to zero with every nonempty new user message.
+Approval and failure resumes omit the counters and keep checkpointed values. A paused
+tool batch has not returned its count yet; on resume, completed @task results are
+reused and the batch is counted once when the node finishes. Counts are per conversation,
+not instance attributes. For direct graph calls, explicitly include both zeros for
+new turns, as shown below; a new HumanMessage alone does not reset them automatically.
+Older checkpoints missing the fields default to zero; no migration is required.
+
+Budget stops end only the current turn, so the console can accept another message.
+`recursion_limit=20` remains a separate graph-step fallback; lowering it too far may
+still raise GraphRecursionError and end the console session. No separate budget,
+reservation, preparation or finish node is introduced.
+
 ## Rolling conversation summaries
 
 Before the first model call of each new user turn, the summary node estimates tokens in the existing summary and message history. At or above the configured threshold, it combines the old summary with older completed turns, keeping the latest **two completed user turns plus the current turn** in their original form. A turn includes all of its tool requests, results, and final answer; it is not a single message.
 
 Edit `AgentConfig` in `config/agent.py` and restart. Agent settings are defined
-in Python; `.env` contains only model settings. The four numeric values should be
+in Python; `.env` contains only model settings. The six numeric values should be
 positive integers; `approval_tools` lists tools that require human approval:
 
 ```python
@@ -221,6 +257,8 @@ class AgentConfig:
     summary_trigger_tokens: int = 500
     summary_keep_turns: int = 2
     recursion_limit: int = 20
+    max_model_calls_per_turn: int = 6
+    max_tool_calls_per_turn: int = 8
     tool_history_limit: int = 10
     approval_tools: tuple[str, ...] = ("delete_todo",)
 ```
@@ -269,7 +307,7 @@ The graph has four nodes and seven tools. Tool history uses the existing
 checkpoint database and has no separate table; retention is configured by
 `AgentConfig.tool_history_limit`.
 `tools()` wraps `ToolNode` to generate the records. The graph uses
-`recursion_limit=20` by default; it has no separate per-tool execution budget.
+`recursion_limit=20` by default, alongside the completed-call limits described above.
 Tool history is generated by the node; the observation middleware below prints
 execution details to the terminal.
 
@@ -462,7 +500,11 @@ For a direct invocation (with an already-open checkpointer):
 ```python
 graph = build_graph(model, checkpointer=checkpointer)
 result = graph.invoke(
-    {"messages": [HumanMessage(text)]},
+    {
+        "messages": [HumanMessage(text)],
+        "model_calls_this_turn": 0,
+        "tool_calls_this_turn": 0,
+    },
     config=config,
 )
 ```
@@ -513,7 +555,7 @@ Filenames use lowercase and Python constants use uppercase; their casing does no
 `main.py` opens the saver, gets `threads = checkpoints.list_threads(checkpointer)`, and passes that ordinary list to `select_thread(threads)` in `console.py`. The menu does not access the database. `agent/checkpoints.py` owns `CHECKPOINTS_FILE` and the SQL used to list saved conversations; `console.py` owns `select_thread()` and `chat()`. Startup enters the conversation menu directly, without command-line argument parsing.
 
 `config/` has three responsibility modules. `agent.py` defines `AgentConfig`:
-summary settings, graph execution steps, tool history retention, and approval tools. `model.py`
+summary settings, graph execution steps, per-turn call limits, tool history retention, and approval tools. `model.py`
 defines and parses `ModelConfig`. `app.py` owns paths, `AppConfig`, the single
 `read_env()` function, and `load_config()` assembly. Only model settings are read
 from `.env`; `config/agent.py` creates one shared `AGENT_CONFIG = AgentConfig()` object.
@@ -560,4 +602,4 @@ From the repository root:
 uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests
 ```
 
-Tests use simulated models, temporary configuration files, and temporary databases without real API keys or network. They cover one-time dependency binding, conversation isolation across shared node objects, dependencies excluded from checkpoints, configuration isolation, threshold boundaries, rolling summaries, tool-pair preservation, failed summary recovery, cross-process restoration, pending todo tool recovery, bounded tool history, read-only history queries, runtime injection, summary preservation of tool records, todo CRUD, Unicode input and storage, per-tool observation, approval/rejection, terminal exit/restart, sequential approvals, cross-process reuse of completed tasks, request/schema validation, draft business checks, single-reply presentation, restart recovery, explicit saving, JSON-mode requests, ordinary queries, and checkpointed natural replies at END.
+Tests use simulated models, temporary configuration files, and temporary databases without real API keys or network. They cover one-time dependency binding, conversation isolation across shared node objects, dependencies excluded from checkpoints, configuration isolation, threshold boundaries, rolling summaries, tool-pair preservation, failed summary recovery, cross-process restoration, pending todo tool recovery, bounded tool history, read-only history queries, runtime injection, summary preservation of tool records, todo CRUD, Unicode input and storage, per-tool observation, approval/rejection, terminal exit/restart, sequential approvals, cross-process reuse of completed tasks, request/schema validation, draft business checks, single-reply presentation, restart recovery, explicit saving, JSON-mode requests, ordinary queries, checkpointed natural replies at END, model/tool limits, whole-batch rejection, new-turn resets, and usage preservation across approval/failure resumes.

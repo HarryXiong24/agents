@@ -31,7 +31,7 @@ def add_tool_history(
 
 
 class AgentState(MessagesState):
-    """Recent messages, summary, bounded tool history, and the latest valid draft."""
+    """Conversation data, latest draft, and completed per-turn model/tool usage."""
 
     # The summary may be absent before compression; read it with state.get("summary", "").
     summary: NotRequired[str]
@@ -47,3 +47,9 @@ class AgentState(MessagesState):
     # Store model_dump data instead of a model/client object in checkpoints.
     # A new draft request clears the previous proposal before generation starts.
     todo_draft: NotRequired[dict[str, Any] | None]
+
+    # Plain replacement fields, not reducers. New console input supplies zero;
+    # graph nodes return the new total after completing their work.
+    # Approval and failure resumes omit these fields, keeping checkpointed totals.
+    model_calls_this_turn: NotRequired[int]
+    tool_calls_this_turn: NotRequired[int]

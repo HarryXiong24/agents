@@ -22,7 +22,7 @@ def build_graph(
     """Bind fixed dependencies once and compile a checkpoint-aware ReAct loop."""
     agent_config = agent_settings.AGENT_CONFIG
     # Node objects hold fixed resources; conversation data remains in AgentState.
-    model_node = ModelNode(model.bind_tools(TOOLS))
+    model_node = ModelNode(model.bind_tools(TOOLS), agent_config)
     summary_node = SummarizeNode(model, agent_config)
     draft_node = DraftNode(model)
     tools_node = ToolsNode(
@@ -30,7 +30,8 @@ def build_graph(
             TOOLS,
             handle_tool_errors=handle_tool_error,
             wrap_tool_call=tool_call_middleware,
-        )
+        ),
+        agent_config,
     )
 
     # Init graph
@@ -47,7 +48,7 @@ def build_graph(
     graph.add_edge(START, "summarize")
     graph.add_edge("summarize", "model")
     graph.add_conditional_edges("model", route_after_model, ["tools", END])
-    graph.add_conditional_edges("tools", route_after_tools, ["model", "draft"])
+    graph.add_conditional_edges("tools", route_after_tools, ["model", "draft", END])
     graph.add_edge("draft", END)
 
     # Restore and save state by thread_id when a checkpointer is supplied.
