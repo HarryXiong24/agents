@@ -13,6 +13,7 @@ from langgraph.types import Command
 
 from agent_apps.todo_list_assistant_agent.agent import memory, middleware
 from agent_apps.todo_list_assistant_agent.agent.graph import build_graph
+from agent_apps.todo_list_assistant_agent.agent.middleware import tool_execution
 from agent_apps.todo_list_assistant_agent.agent.prompts import TOOL_ERROR_MESSAGE
 
 
@@ -37,7 +38,7 @@ def test_observer_passes_request_and_result_through_once(
         runtime=Mock(),
     )
     execute = Mock(return_value=result)
-    monkeypatch.setattr(middleware, "perf_counter", Mock(side_effect=[10, 10.125]))
+    monkeypatch.setattr(tool_execution, "perf_counter", Mock(side_effect=[10, 10.125]))
 
     assert middleware.observe_tool_call(request, execute) is result
 
@@ -57,7 +58,7 @@ def test_observer_reports_exception_and_preserves_it(monkeypatch, capsys):
     )
     error = RuntimeError("Execution failed.")
     execute = Mock(side_effect=error)
-    monkeypatch.setattr(middleware, "perf_counter", Mock(side_effect=[10, 10.25]))
+    monkeypatch.setattr(tool_execution, "perf_counter", Mock(side_effect=[10, 10.25]))
 
     with pytest.raises(RuntimeError) as caught:
         middleware.observe_tool_call(request, execute)

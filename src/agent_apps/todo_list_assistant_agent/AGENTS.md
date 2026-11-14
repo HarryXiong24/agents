@@ -120,6 +120,13 @@ implementation before describing behavior; preserve unrelated user changes.
   receive only State/call data; never pass self, clients, executors, or Runtime as
   serialized task arguments. Preserve registered node/task names and execution order.
   ToolRuntime injection inside tools remains supported independently of this layout.
+- Group tools by capability in `agent/tools/`; assemble the shared `TOOLS` list
+  and export the tool functions in `tools/__init__.py`. Keep the draft request tool
+  in `tools/draft.py`; structured generation remains in `nodes/draft.py`.
+  Put human approval in `middleware/approval.py`, observation and error formatting
+  in `middleware/tool_execution.py`, and composition/public exports in
+  `middleware/__init__.py`. Keep approval outside observation and preserve
+  graph/task registration names, tool contracts and persisted-data paths.
 - Treat `config/` as the configuration entry point, with a public API in
   `config/__init__.py` and environment-file reading confined to `config/app.py`.
   Group settings into `agent.py`, `model.py`, and `app.py`; keep `__init__.py`
@@ -221,6 +228,11 @@ implementation before describing behavior; preserve unrelated user changes.
   固定依赖不要求自定义 Context。任务通过闭包捕获执行器，参数只接收 State／调用数据，
   不将 self、客户端、执行器或 Runtime 作为序列化任务参数。保持注册节点／任务名与执行顺序。
   工具内的 ToolRuntime 注入独立于这种布局，继续保留。
+- 工具在 `agent/tools/` 按能力分组，由 `tools/__init__.py` 组装共享 `TOOLS` 并导出工具函数。
+  草案请求工具在 `tools/draft.py`，结构化生成仍由 `nodes/draft.py` 负责。
+  人工审批在 `middleware/approval.py`，观察与错误格式化在 `middleware/tool_execution.py`，
+  组合与公开导出在 `middleware/__init__.py`。保持审批位于观察外层，
+  保持图／任务注册名称、工具契约与持久化数据路径不变。
 - `config/` 是配置统一入口，由 `config/__init__.py` 提供公开 API，
   环境文件读取集中在 `config/app.py`，按 `agent.py`、`model.py`、`app.py` 三类组织；
   `__init__.py` 只重新导出接口，各自模块定义 `AgentConfig` 和 `ModelConfig`，

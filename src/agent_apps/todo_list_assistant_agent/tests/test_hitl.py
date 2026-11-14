@@ -19,6 +19,7 @@ from agent_apps.todo_list_assistant_agent import console
 from agent_apps.todo_list_assistant_agent import main as app
 from agent_apps.todo_list_assistant_agent.agent import checkpoints, memory, middleware
 from agent_apps.todo_list_assistant_agent.agent.graph import build_graph
+from agent_apps.todo_list_assistant_agent.agent.middleware import approval
 from agent_apps.todo_list_assistant_agent.config import AgentConfig
 from agent_apps.todo_list_assistant_agent.config import agent as agent_settings
 from agent_apps.todo_list_assistant_agent.config import app as app_config
@@ -113,7 +114,7 @@ def test_approval_wraps_observation_and_executor_in_order(monkeypatch):
         order.append("execute")
         return result
 
-    monkeypatch.setattr(middleware, "interrupt", approve)
+    monkeypatch.setattr(approval, "interrupt", approve)
     monkeypatch.setattr(middleware, "observe_tool_call", observe)
     assert middleware.tool_call_middleware(request, execute) is result
     assert order == ["approval", "observation-before", "execute", "observation-after"]
@@ -123,7 +124,7 @@ def test_approval_wraps_observation_and_executor_in_order(monkeypatch):
 def test_non_boolean_approval_fails_closed(decision, monkeypatch):
     request = ToolCallRequest(tool_call=deletion(), tool=None, state={}, runtime=Mock())
     execute = Mock()
-    monkeypatch.setattr(middleware, "interrupt", Mock(return_value=decision))
+    monkeypatch.setattr(approval, "interrupt", Mock(return_value=decision))
     with pytest.raises(ValueError, match="explicit boolean"):
         middleware.tool_call_middleware(request, execute)
     execute.assert_not_called()
@@ -141,7 +142,7 @@ def test_tool_error_handler_preserves_interrupts():
 def test_approval_can_be_explicitly_disabled_in_shared_config(monkeypatch):
     monkeypatch.setattr(agent_settings, "AGENT_CONFIG", AgentConfig(approval_tools=()))
     ask = Mock(side_effect=AssertionError("Approval is disabled"))
-    monkeypatch.setattr(middleware, "interrupt", ask)
+    monkeypatch.setattr(approval, "interrupt", ask)
     request = ToolCallRequest(tool_call=deletion(), tool=None, state={}, runtime=Mock())
     result = ToolMessage(content="Deleted.", tool_call_id="delete")
     execute = Mock(return_value=result)

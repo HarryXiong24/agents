@@ -1,4 +1,4 @@
-"""Compose human approval and observation around individual tool calls."""
+"""Observe individual tool executions and format recognized input errors."""
 
 from collections.abc import Callable
 from time import perf_counter
@@ -6,12 +6,11 @@ from time import perf_counter
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt.tool_node import ToolCallRequest, ToolInvocationError
-from langgraph.types import Command, interrupt
+from langgraph.types import Command
 from pydantic import ValidationError
 
-from ..config import agent as agent_settings
-from .errors import InputTypeError, InputValueError
-from .prompts import TOOL_ERROR_MESSAGE
+from ..errors import InputTypeError, InputValueError
+from ..prompts import TOOL_ERROR_MESSAGE
 
 
 def handle_tool_error(error: Exception) -> str:
@@ -35,39 +34,6 @@ def handle_tool_error(error: Exception) -> str:
         # retry a write, or hide a programmer's generic TypeError/ValueError.
         raise error
     return f"{TOOL_ERROR_MESSAGE} Details: {detail}"
-
-
-def approve_tool_call(
-    request: ToolCallRequest,
-    execute: Callable[[ToolCallRequest], ToolMessage | Command],
-) -> ToolMessage | Command:
-    """Pause protected calls and continue only after an explicit boolean approval."""
-    call = request.tool_call
-    if call["name"] not in agent_settings.AGENT_CONFIG.approval_tools:
-        return execute(request)
-
-    # JSON data is saved with the interrupt. Only console.py reads terminal input.
-    # On replay, interrupt returns the value supplied by Command(resume=...).
-    decision = interrupt(
-        {
-            "kind": "tool_approval",
-            "tool_name": call["name"],
-            "tool_call_id": call["id"],
-            "args": call["args"],
-        }
-    )
-    if not isinstance(decision, dict) or type(decision.get("approved")) is not bool:
-        raise ValueError("Approval requires an explicit boolean 'approved' value.")
-    if decision["approved"]:
-        return execute(request)
-
-    # Complete the model's tool request even when execution is declined.
-    return ToolMessage(
-        content="The user rejected this tool call. It was not executed. Do not retry this operation without a new user request.",
-        name=call["name"],
-        tool_call_id=call["id"],
-        status="error",
-    )
 
 
 def observe_tool_call(
@@ -99,15 +65,3 @@ def observe_tool_call(
             f"status={status}, elapsed={elapsed:.3f}s"
         )
         print("------")
-
-
-def tool_call_middleware(
-    request: ToolCallRequest,
-    execute: Callable[[ToolCallRequest], ToolMessage | Command],
-) -> ToolMessage | Command:
-    """Run approval outside observation, so timing starts only after approval."""
-
-    def observe(approved_request: ToolCallRequest) -> ToolMessage | Command:
-        return observe_tool_call(approved_request, execute)
-
-    return approve_tool_call(request, observe)

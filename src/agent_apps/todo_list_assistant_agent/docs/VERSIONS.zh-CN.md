@@ -27,6 +27,20 @@
 
 图中既包含程序组件，也包含数据流。第一至第四版有“模型节点”和“工具节点”，第五版新增“摘要节点”；第六版沿用这三个节点，在工具步骤内增加自定义状态处理。第七版在 `ToolNode` 内增加包装函数，不增加节点；第八版新增第四个 draft 节点，生成并校验结构化草案；第九版沿用四个节点，在内部增加调用次数检查。存储辅助函数和终端循环仍不是图节点。
 
+### 第九版当前源码布局
+
+工具与工具调用包装函数已改为包。这属于当前版本内的目录整理，节点／任务名称、
+工具契约、审批顺序、检查点和待办数据路径均保持不变。旧章节保留历史文件名，
+对照当前代码学习时使用下面的映射：
+
+| 历史模块 | 当前模块 |
+|---|---|
+| `agent/tools.py` | `agent/tools/__init__.py` 组装／导出 `TOOLS`，`time.py`、`calculator.py`、`todos.py`、`history.py`、`draft.py` 各自实现工具 |
+| `agent/middleware.py` | `agent/middleware/__init__.py` 组合／导出包装函数，`approval.py` 负责审批，`tool_execution.py` 负责观察与输入错误格式化 |
+
+草案请求工具在 `agent/tools/draft.py`；实际结构化生成仍在 `agent/nodes/draft.py`。
+完整目录树以最新 README 为准。
+
 ## 第一版：终端对话与最小 ReAct
 
 ### 学习目标
@@ -1335,8 +1349,8 @@ flowchart TD
 | agent/graph.py | 已有工具路由允许返回 END，仍是四个节点 |
 | console.py | 仅在新输入时重置，恢复时保留检查点用量 |
 | tests/test_budgets.py | 边界、拒绝无副作用、新轮次、配对、审批和失败恢复 |
-| agent/errors.py、memory.py、tools.py | 标记输入异常；计算器业务失败转为错误 |
-| agent/middleware.py | 已知输入错误转为消息；运行故障与控制信号传播 |
+| agent/errors.py、memory.py、tools/ | 标记输入异常；计算器业务失败转为错误 |
+| agent/middleware/ | 已知输入错误转为消息；运行故障与控制信号传播 |
 | config/model.py、console.py | 已有 SDK 重试设置与最终错误分类提示 |
 | tests/test_errors.py | 模拟 HTTP 重试、错误类别、不重试工具与写入结果复用 |
 
@@ -1413,7 +1427,7 @@ SDK 重试后成功，主模型计数只加一；尝试全部失败时不提交�
 摘要／草案仍不计入主模型次数。本地工具不自动重试。之后重启时，已完成任务可复用结果，
 不重跑之前成功的写入；但写入与检查点之间的崩溃窗口仍可能重复副作用，不保证严格只写一次。
 
-阅读顺序：agent/errors.py、memory.py、tools.py，然后看 middleware.handle_tool_error、
+阅读顺序：agent/errors.py、memory.py、tools/，然后看 middleware.handle_tool_error、
 console.describe_api_error 和 ModelConfig.max_retries。tests/test_errors.py 用真实客户端搭配
 模拟 HTTP 传输验证请求次数、最终错误分类、计数语义，以及工具批次部分完成后存储失败的恢复。
 

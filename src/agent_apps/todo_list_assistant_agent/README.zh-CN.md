@@ -32,7 +32,7 @@ SQLite 会话检查点、待办数据库，以及通过自定义 State reducer �
 保存仍需要三个字段。保存工具要求 `minutes` 是真正的整数，
 布尔值、数字字符串和浮点数会被拒绝，不自动转换。当前没有完成状态，表达“做完了”不会自动删除，也不能标记完成。同名同日期更新只改变耗时；修改名称或日期会新增记录，不会替换旧记录。
 
-待办使用 `data/todos.sqlite` 数据库、`todos` 表和 `TodoItem` 类型。`agent/memory.py` 中的存储函数为 `load_todos()`、`save_todo()`、`delete_todo()`；`agent/tools.py` 中提供给模型的工具为 `save_todo` 和 `delete_todo`。会话与摘要使用 `data/todo_checkpoints.sqlite`。
+待办使用 `data/todos.sqlite` 数据库、`todos` 表和 `TodoItem` 类型。`agent/memory.py` 中的存储函数为 `load_todos()`、`save_todo()`、`delete_todo()`；`agent/tools/` 中提供给模型的工具为 `save_todo` 和 `delete_todo`。会话与摘要使用 `data/todo_checkpoints.sqlite`。
 
 ## 启动
 
@@ -110,10 +110,10 @@ Assistant: That is 315 minutes, or 5.25 hours.
 
 ## 按积木阅读
 
-1. 读 `agent/tools.py`：普通函数怎样通过 `@tool` 变成工具；参数和说明怎样帮助模型选择工具。
+1. 读 `agent/tools/`：普通函数怎样通过 `@tool` 变成工具；参数和说明怎样帮助模型选择工具。
 2. 读 `config/` 和 `agent/model.py`：配置与模型创建；再看 `agent/graph.py` 怎样一次性组装模型包装器与节点对象。
 3. 读 `agent/memory.py` 和 `agent/prompts.py`：待办事项怎样写入数据库、查询，再进入系统提示词。
-4. 读 `agent/middleware.py`：理解 `ToolNode` 怎样在每次工具调用周围传入请求与执行器。
+4. 读 `agent/middleware/`：理解 `ToolNode` 怎样在每次工具调用周围传入请求与执行器。
 5. 读 `agent/state.py` 和 `agent/nodes/tools.py`：`tools()` 怎样返回新增记录，reducer 怎样合并；再读 `agent/nodes/model.py`、`agent/nodes/summarize.py` 的模型调用与摘要检查，最后看 `agent/graph.py` 的组装和路由。
 6. 读 `agent/checkpoints.py` 和 `console.py`：存储层怎样返回会话名称列表，菜单怎样选择，以及 `chat()` 怎样将新消息和对应的 `thread_id` 交给图。
 7. 读 `agent/schemas.py` 和 `agent/nodes/draft.py`：模型结构化输出、请求约束检查、草案持久化和单条最终回复。
@@ -351,7 +351,9 @@ Approve this call? [y/n/exit]:
 普通失败仍使用 `invoke(None, config)`。审批答案不会作为 `HumanMessage` 加入聊天，
 图暂停时也不会打印最终助手回答。多个受保护调用按请求顺序逐一审批，不支持编辑参数或批量批准。
 
-`agent/middleware.py` 通过 `tool_call_middleware()` 组合两个包装函数：
+`agent/middleware/approval.py` 定义 `approve_tool_call()`；
+`agent/middleware/tool_execution.py` 包含 `observe_tool_call()` 与 `handle_tool_error()`。
+`middleware/__init__.py` 统一导出这些 hook，并定义 `tool_call_middleware()` 组合两个包装函数：
 
 ```text
 工具请求 -> approve_tool_call（外层）
@@ -455,8 +457,17 @@ todo_list_assistant_agent/
 │   ├── state.py                  # 消息、摘要、工具历史和草案
 │   ├── schemas.py                # 请求与生成草案的 schema
 │   ├── errors.py                 # 明确的值／类型校验异常
-│   ├── tools.py                  # 时间、计算、待办和历史查询
-│   ├── middleware.py             # 人工审批、观察与组合
+│   ├── tools/                    # 按能力组织工具与共享工具列表
+│   │   ├── __init__.py           # 组装 TOOLS 并统一导出工具
+│   │   ├── time.py               # 本地日期与时间
+│   │   ├── calculator.py         # 数值计算
+│   │   ├── todos.py              # 保存、删除、查询待办
+│   │   ├── history.py            # 通过 runtime 读取工具历史
+│   │   └── draft.py              # 校验交给草案节点的请求
+│   ├── middleware/               # 单次调用包装与错误格式化
+│   │   ├── __init__.py           # 公开导出与包装函数组合
+│   │   ├── approval.py           # 使用 interrupt 进行人工审批
+│   │   └── tool_execution.py     # 执行观察与已知输入错误处理
 │   ├── model.py                  # 创建聊天模型
 │   ├── prompts.py                # 读取模板与动态组装提示词
 │   ├── memory.py                 # 待办校验与 SQLite 增删改查
@@ -478,6 +489,11 @@ todo_list_assistant_agent/
 ```
 
 应用按下面的职责边界分层：
+
+`tools/__init__.py` 组装 `TOOLS` 并统一导出各个工具，因此原有的
+`from .tools import TOOLS` 导入仍然有效。工具名称、schema 与注册顺序不变。
+`tools/draft.py` 只校验草案请求并返回约束，`nodes/draft.py` 仍负责结构化生成与业务检查。
+这两个模块职责不同，图仍然保留原来的四个节点。
 
 `agent/graph.py` 在 `build_graph(model, checkpointer=...)` 中一次性准备工具绑定模型与 `ToolNode`，创建四个小型节点对象并注册绑定方法。
 固定依赖保存在实例字段中，每个执行方法只接收 `state`。
@@ -526,7 +542,7 @@ result = graph.invoke(
 | 层次 | 位置 | 职责 |
 |---|---|---|
 | 入口与交互 | `main.py`、`console.py` | 资源生命周期、组装、会话菜单和输入输出 |
-| Agent 执行 | `agent/graph.py`、`agent/nodes/`、`state.py`、`tools.py` 等 | 图组装、节点执行、State、工具、模型与提示词 |
+| Agent 执行 | `agent/graph.py`、`agent/nodes/`、`state.py`、`tools/`、`middleware/` 等 | 图组装、节点执行、State、工具、模型与提示词 |
 | Agent 持久化 | `agent/memory.py`、`agent/checkpoints.py` | 待办 SQLite 增删改查、检查点会话查询 |
 | 共享配置 | `config/` | 统一加载设置、默认值、校验和应用数据路径 |
 

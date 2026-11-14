@@ -29,6 +29,21 @@ Current Agent execution and persistence modules live under `agent/`, with startu
 Diagrams show components and data flow. Versions 1-4 have **Model node** and **Tool node**; version 5 adds **Summary node**. Version 6 keeps those three nodes and adds custom state processing inside the tools step. Version 7 adds wrappers inside `ToolNode` without adding nodes; version 8 adds a fourth draft node for structured generation and validation; version 9 keeps those four nodes and adds internal call-limit checks. Storage helpers
 and the console are ordinary Python functions.
 
+### Current source layout within version 9
+
+Tools and tool-call wrappers are now packages. This is a layout refactor within
+the current version; node/task names, tool contracts, approval order, checkpoints
+and todo data paths are unchanged. Earlier sections retain historical filenames.
+Use this mapping when following their examples in the current source:
+
+| Historical module | Current modules |
+|---|---|
+| `agent/tools.py` | `agent/tools/__init__.py` assembles/exports `TOOLS`; `time.py`, `calculator.py`, `todos.py`, `history.py`, `draft.py` contain the tools |
+| `agent/middleware.py` | `agent/middleware/__init__.py` composes/exports wrappers; `approval.py` controls approval; `tool_execution.py` observes execution and formats input errors |
+
+The draft request tool is in `agent/tools/draft.py`; actual structured generation
+remains in `agent/nodes/draft.py`. Read the latest README for the complete tree.
+
 ## Version 1: console chat and minimal ReAct
 
 ### Learning goal
@@ -1444,8 +1459,8 @@ flowchart TD
 | agent/graph.py | Allow the existing tools router to choose END; still four nodes |
 | console.py | Reset both totals for new input only; resumes keep checkpointed totals |
 | tests/test_budgets.py | Boundaries, no effects on rejection, new turns, pairing, approval and failure recovery |
-| agent/errors.py, memory.py and tools.py | Mark input errors; calculator business failures become errors |
-| agent/middleware.py | Known input errors become messages; operational failures and control signals propagate |
+| agent/errors.py, memory.py and tools/ | Mark input errors; calculator business failures become errors |
+| agent/middleware/ | Known input errors become messages; operational failures and control signals propagate |
 | config/model.py and console.py | Existing SDK retry setting and final error-category advice |
 | tests/test_errors.py | Mock HTTP retries, error categories, no tool retry and write-result reuse |
 
@@ -1543,7 +1558,7 @@ No local tool is automatically retried. On a later restart, completed task resul
 be reused without rerunning a successful earlier write, but a write/checkpoint crash
 window can still repeat effects. This is not an exactly-once write guarantee.
 
-Read agent/errors.py, memory.py and tools.py, then middleware.handle_tool_error,
+Read agent/errors.py, memory.py and tools/, then middleware.handle_tool_error,
 console.describe_api_error and ModelConfig.max_retries. See tests/test_errors.py for
 real client requests through mock HTTP transport, final failure classification,
 unchanged quota semantics, and a partial-batch storage failure followed by recovery.

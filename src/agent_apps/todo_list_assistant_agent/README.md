@@ -36,7 +36,7 @@ Todos persist across restarts and are shared by conversations in this applicatio
 All three fields are required when saving. The save tool requires an actual integer
 for `minutes`; booleans, numeric strings, and floats are rejected rather than converted. There is no completion/status field: saying a todo is done does not delete it or mark it complete. Updating the same name and date changes only duration; changing a name or date adds another record, rather than replacing the old one.
 
-Todo records use `data/todos.sqlite`, the `todos` table, and the `TodoItem` type. Storage functions are `load_todos()`, `save_todo()`, and `delete_todo()` in `agent/memory.py`; the model-facing tools are `save_todo` and `delete_todo` in `agent/tools.py`. Conversations and summaries use `data/todo_checkpoints.sqlite`.
+Todo records use `data/todos.sqlite`, the `todos` table, and the `TodoItem` type. Storage functions are `load_todos()`, `save_todo()`, and `delete_todo()` in `agent/memory.py`; the model-facing tools are `save_todo` and `delete_todo` in `agent/tools/`. Conversations and summaries use `data/todo_checkpoints.sqlite`.
 
 ## Run
 
@@ -112,10 +112,10 @@ Ask "What time is it?" to observe the time tool. It returns local time in `YYYY-
 
 ## Read one block at a time
 
-1. `agent/tools.py`: how `@tool`, parameter types, and descriptions expose local functions to the model.
+1. `agent/tools/`: how `@tool`, parameter types, and descriptions expose local functions to the model.
 2. `config/` and `agent/model.py`: configuration followed by model creation. `agent/graph.py` assembles model wrappers and node objects once.
 3. `agent/memory.py` and `agent/prompts.py`: how todos are stored, queried, and inserted into the system prompt.
-4. `agent/middleware.py`: how `ToolNode` supplies a request and executor around each tool call.
+4. `agent/middleware/`: how `ToolNode` supplies a request and executor around each tool call.
 5. `agent/state.py` and `agent/nodes/tools.py`: how `tools()` returns new records and the reducer merges them. Read `agent/nodes/model.py` and `agent/nodes/summarize.py` for model calls and summary checks, then `agent/graph.py` for assembly and routing.
 6. `agent/checkpoints.py` and `console.py`: how storage returns a list of conversation names, the menu selects one, and `chat()` sends new messages with its `thread_id`.
 7. `agent/schemas.py` and `agent/nodes/draft.py`: structured model output, user-constraint checks, checkpointed proposals and one final reply.
@@ -392,7 +392,10 @@ The console does not add approval answers as `HumanMessage`s or print a final
 assistant answer while the graph is paused. Multiple protected calls are reviewed
 one at a time, in request order. There is no argument editing or bulk approval.
 
-`agent/middleware.py` contains two wrappers composed by `tool_call_middleware()`:
+`agent/middleware/approval.py` defines `approve_tool_call()`.
+`agent/middleware/tool_execution.py` holds `observe_tool_call()` and
+`handle_tool_error()`. `middleware/__init__.py` exports these hooks and defines
+`tool_call_middleware()` to compose the two wrappers:
 
 ```text
 Tool request -> approve_tool_call (outer)
@@ -508,8 +511,17 @@ todo_list_assistant_agent/
 │   ├── state.py                  # Messages, summary, tool history, and draft
 │   ├── schemas.py                # Request and generated draft schemas
 │   ├── errors.py                 # Explicit value/type validation errors
-│   ├── tools.py                  # Time, arithmetic, todos, and history lookup
-│   ├── middleware.py             # Approval, observation, and composition
+│   ├── tools/                    # Capability modules and shared tool list
+│   │   ├── __init__.py           # TOOLS assembly and public tool exports
+│   │   ├── time.py               # Local date and time
+│   │   ├── calculator.py         # Arithmetic
+│   │   ├── todos.py              # Save, delete, and list todos
+│   │   ├── history.py            # Runtime-injected tool history lookup
+│   │   └── draft.py              # Validate requests for the draft node
+│   ├── middleware/               # Per-call wrappers and error formatting
+│   │   ├── __init__.py           # Public exports and wrapper composition
+│   │   ├── approval.py           # Human approval via interrupt
+│   │   └── tool_execution.py     # Observation and known-input error handling
 │   ├── model.py                  # Chat model creation
 │   ├── prompts.py                # Template loading and dynamic prompt formatting
 │   ├── memory.py                 # Todo validation and SQLite CRUD
@@ -529,6 +541,12 @@ todo_list_assistant_agent/
 ├── docs/                         # Bilingual learning guides
 └── tests/                        # Offline tests with temporary storage
 ```
+
+`tools/__init__.py` assembles `TOOLS` and exports the individual tools, so existing
+`from .tools import TOOLS` imports remain valid. Tool names, schemas and order are
+unchanged. `tools/draft.py` validates a draft request and returns its constraints;
+`nodes/draft.py` still performs structured generation and business checks. These
+are distinct responsibilities and the graph still has the same four nodes.
 
 `agent/graph.py` prepares the tool-bound model and `ToolNode` once inside `build_graph(model, checkpointer=...)`. It constructs four
 small node objects and registers their bound methods. Fixed dependencies live in
@@ -583,7 +601,7 @@ The application uses these responsibility boundaries:
 | Layer | Location | Responsibility |
 |---|---|---|
 | Entry and interaction | `main.py`, `console.py` | Resource lifetime, composition, session menu, and input/output |
-| Agent execution | `agent/graph.py`, `agent/nodes/`, `state.py`, `tools.py`, and related modules | Graph assembly, node execution, State, tools, model, and prompts |
+| Agent execution | `agent/graph.py`, `agent/nodes/`, `state.py`, `tools/`, `middleware/`, and related modules | Graph assembly, node execution, State, tools, model, and prompts |
 | Agent persistence | `agent/memory.py`, `agent/checkpoints.py` | Todo SQLite CRUD and checkpoint conversation queries |
 | Shared configuration | `config/` | Central settings loading, defaults, validation, and application data paths |
 
