@@ -30,6 +30,15 @@ instructions and preserve unrelated changes, especially the sibling manual agent
 - Do not copy real credentials or personal databases from another application.
   Do not migrate sibling data unless the user requests it. Keep .env and data/
   ignored. Drafts are not saved records; only explicit writes change todos.
+- Skills are trusted, version-controlled skills/<name>/SKILL.md directories loaded
+  once at startup by agent/skills.py. State keeps only active names; skill text
+  is prompt guidance and never bypasses approval, validation or quotas.
+- MCP servers come from the ignored, application-local mcp.json; ${NAME} values
+  resolve only from the local .env. agent/mcp.py owns sessions and sync tool
+  wrappers. Preserve resolved stdio env values without shell interpolation, and
+  await session/task cleanup before closing the private event loop.
+  MCP tools require approval unless a server opts out, and tests must
+  never start a developer's personal mcp.json servers.
 - Distinguish prompt guidance from enforced rules, checkpoint State from model
   context, and offline tests from live-provider verification. Explain real behavior
   differences from the manual application. Do not claim exactly-once execution.
@@ -64,6 +73,13 @@ instructions and preserve unrelated changes, especially the sibling manual agent
   自定义状态字段集中在 agent/state.py，数据路径归属本应用。
 - 不复制其他应用的真实凭据或个人数据库。用户未要求时不迁移旁边应用的数据。
   .env 与 data/ 保持忽略。草案不是已保存记录，只有明确写操作改变待办。
+- 技能是受信任、受版本控制的 skills/<name>/SKILL.md 目录，由 agent/skills.py 在启动时
+  一次性加载。State 只保存已激活名称；技能文本是 prompt 引导，不能绕过审批、校验或配额。
+- MCP 服务器来自被忽略的本应用 mcp.json；${NAME} 只从本地 .env 解析。agent/mcp.py
+  负责会话与同步工具包装。stdio 已解析的 env 值不得再次从 shell 展开；
+  关闭私有事件循环前必须等待会话／任务清理完成。除非服务器显式关闭，
+  MCP 工具需要审批；测试不得启动
+  开发者个人 mcp.json 中的服务器。
 - 区分 prompt 引导与代码强制、检查点 State 与模型上下文、离线测试与真实供应商验证。
   说明与手动应用的真实差异，不声称 exactly-once 执行。
 - 只把明确的输入错误格式化为工具结果；保留框架中断，向上抛出存储/程序故障。

@@ -23,8 +23,15 @@ def add_tool_history(
     return (old + new)[-agent_settings.AGENT_CONFIG.tool_history_limit :]
 
 
+def add_active_skills(old: list[str], new: list[str]) -> list[str]:
+    """Move reloaded skills to the end and keep only the most recent ones."""
+    merged = [name for name in old if name not in new] + list(dict.fromkeys(new))
+    limit = agent_settings.AGENT_CONFIG.max_active_skills
+    return merged[-limit:] if limit > 0 else []
+
+
 class AgentState(BaseAgentState):
-    """Messages plus proposal, history and checkpointed per-user-turn usage."""
+    """Messages plus proposal, history, skills and checkpointed per-user-turn usage."""
 
     todo_draft: NotRequired[dict[str, Any] | None]
     # Internal handoff from the return-direct draft tool to its presentation hook.
@@ -35,3 +42,5 @@ class AgentState(BaseAgentState):
     model_calls_this_turn: NotRequired[int]
     # Count admitted requests before approval, rather than completed batches.
     tool_calls_this_turn: NotRequired[int]
+    # Names only; instructions come from the startup registry on each model call.
+    active_skills: NotRequired[Annotated[list[str], add_active_skills]]

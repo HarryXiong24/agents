@@ -40,6 +40,9 @@ uv run --locked todo-list-assistant-create-agent
 - “帮我安排 Python 和英语，日期 2026-11-16，总共不超过 90 分钟。”
 - “保存刚才草案里的 Python。”——明确请求后才保存这一条。
 - “刚才调用了哪些工具？参数和结果是什么？”
+- “帮我规划明天的 Python 学习，总共 2 小时。”——可能加载 `study-plan` 技能。
+- “帮我整理一下待办列表。”——可能加载只读的 `todo-cleanup` 技能。
+- “把 Python 的 70 分钟拆成番茄钟。”——配置后会调用示例 MCP 服务器。
 
 以上是输入示例，不是真实模型运行记录。工具选择和回答措辞取决于配置的模型。
 
@@ -55,6 +58,8 @@ uv run --locked todo-list-assistant-create-agent
 | 摘要压缩 | 内置中间件用摘要消息替换较早消息 |
 | 工具历史 | 每个会话保留最近 10 条已完成或被拒绝的请求 |
 | 安排草案 | 独立 JSON mode 模型调用，Pydantic 与业务规则校验，不写数据库 |
+| 技能 | 本地 `SKILL.md` 操作手册；目录始终可见，按需加载完整指令 |
+| MCP 工具 | 来自本地 `mcp.json` 的服务器（stdio 或 streamable HTTP）；默认需要审批 |
 | 边界限制 | 每轮主模型调用、获准进入流程的工具请求配额，以及图递归限制 |
 
 本应用的不同会话共享待办；消息、候选草案、计数与工具历史按会话隔离。
@@ -65,6 +70,107 @@ uv run --locked todo-list-assistant-create-agent
 由展示 hook 生成一次最终回答；普通聊天仍是自由文本。
 请求新草案时先清空旧候选，失败候选不会保留。保存草案后不清空候选；
 候选始终代表建议，数据库才代表已经保存的内容。
+
+## 技能（Skills）
+
+技能遵循 Agent Skills 目录格式：`skills/` 下每个技能一个目录，
+其中 `SKILL.md` 以 YAML frontmatter 开头。
+
+```text
+skills/
+├── study-plan/
+│   ├── SKILL.md
+│   └── references/session-guide.md
+└── todo-cleanup/
+    └── SKILL.md
+```
+
+```markdown
+---
+name: study-plan            # 小写字母/数字/连字符，必须与目录名相同
+description: 做什么、何时使用（1–1024 个字符）。
+---
+
+# 给主模型的 Markdown 指令
+```
+
+技能采用渐进式披露：
+
+| 层级 | 时机 | 内容 | 机制 |
+|---|---|---|---|
+| 1. 目录 | 每次主模型调用 | 所有技能的名称与描述 | `SkillsMiddleware.wrap_model_call` |
+| 2. 指令 | `load_skill(name)` 之后 | `SKILL.md` 正文 | 名称写入 `active_skills`，后续调用注入正文 |
+| 3. 参考资料 | `read_skill_file(name, path)` | `references/*.md` 或 `*.txt` 文件 | 作为工具结果返回 |
+
+- 技能在启动时一次性加载。格式错误的技能（frontmatter、名称、大小、UTF-8，
+  或参考文件解析到目录外）会以 `Startup failed: ...` 停止启动，而不是被跳过。
+  修改文件后需重启生效。
+- State 只保存技能名称。指令放在 system message 中，不在 `messages` 内，
+  因此摘要不会删除它们；按会话保留，直到更新的加载使其超出 `max_active_skills`。
+- 代码强制 `read_skill_file` 只能读取已激活技能的预加载路径，调用时不访问磁盘。
+  脚本和其他资源不会被加载或执行。
+- `load_skill` 与 `read_skill_file` 是普通工具：各占一个工具配额和一次模型步骤，
+  进入工具历史，并遵守单工具规则。
+- 技能是来自受信任、受版本控制文件的 prompt 引导，不能绕过审批、校验或配额。
+  没有 `skills/` 目录时，两个技能工具和技能提示段都不会注册。
+
+新增技能：创建 `skills/<name>/SKILL.md`，按需添加 `references/`，然后重启。
+只写入审阅过的指令：技能文本会进入 system prompt。
+
+## MCP 服务器
+
+复制示例配置，即可启用随应用提供、无副作用的番茄钟服务器：
+
+```bash
+cp src/agent_apps/todo_list_assistant_create_agent/mcp.example.json src/agent_apps/todo_list_assistant_create_agent/mcp.json
+```
+
+```json
+{
+  "mcpServers": {
+    "pomodoro": {
+      "transport": "stdio",
+      "command": "python",
+      "args": ["-m", "agent_apps.todo_list_assistant_create_agent.mcp_servers.pomodoro"],
+      "require_approval": false
+    },
+    "remote": {
+      "transport": "streamable_http",
+      "url": "https://example.test/mcp",
+      "headers": {"Authorization": "Bearer ${MCP_TOKEN}"},
+      "tools": ["search"],
+      "timeout": 30
+    }
+  }
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `transport` | `stdio`（默认）或 `streamable_http` |
+| `command` / `args` / `env` / `cwd` | stdio 进程；字面量命令 `python` 表示运行本应用的解释器 |
+| `url` / `headers` | streamable HTTP 端点 |
+| `tools` | 可选的服务器工具名白名单；省略表示全部 |
+| `require_approval` | 默认 `true`：内置 HITL 在执行该服务器的每个工具前暂停 |
+| `timeout` | 握手与每次调用的秒数（默认 30，最大 600） |
+
+- `${NAME}` 占位符只从本应用 `.env` 解析；缺失时停止启动，不使用 shell 变量。
+  从 `.env` 取出的值不再二次展开，其中作为字面量的 `$` 与 `${NAME}` 保持原样。
+  `mcp.json` 由 Git 忽略。
+- stdio 服务器只收到 MCP SDK 的安全默认环境变量（如 `PATH`、`HOME`）和自己的
+  `env`，不会继承完整 shell 环境。
+- 服务器在会话菜单之后连接一次，保持打开直到退出，启动时打印 `MCP tools: ...`。
+  无法启动、无法在 `timeout` 内列出工具或不满足白名单的服务器会停止启动。
+- 退出时先给会话 10 秒正常关闭。清理仍未完成则取消并等待所属任务收尾，
+  其余任务也会取消并等待，之后才关闭事件循环。取消后的清理可能需要额外时间，
+  所以 10 秒不是整个关闭过程的硬截止时间。
+- 每个工具以 `<server>_<tool>` 暴露，描述以 `[MCP server: name]` 开头。
+  名称必须符合供应商规则且在所有工具中唯一，否则停止启动。
+- MCP 工具在这里是普通工具：每步一个、在审批前计入工具配额、进入工具历史并记录耗时。
+- 服务器报告的错误（`isError`）变成模型可读的错误 ToolMessage。超时和传输/会话
+  故障抛出 `McpServerError`，终端报告后结束本轮。没有重连或重试循环。
+- 结果被展平为文本；非文本内容只标注类型，不转发。提示词要求模型把 MCP 结果
+  当作数据而非指令——这是引导，审批与配额才由代码强制。
 
 ## 配置与持久化
 
@@ -84,6 +190,9 @@ uv run --locked todo-list-assistant-create-agent
 | `tool_history_limit` | `config/agent.py` | 10 条记录 |
 | `approval_tools` | `config/agent.py` | `("delete_todo",)` |
 | `recursion_limit` | `config/agent.py` | 80 个图执行步骤 |
+| `max_active_skills` | `config/agent.py` | 最近加载的 2 个技能 |
+| `SKILLS_DIR` | `config/app.py` | 本应用内的 `skills/` |
+| `MCP_FILE` | `config/app.py` | 本应用内的 `mcp.json`；不存在表示不启用 MCP |
 
 摘要与草案的模型调用不计入主模型配额。SDK HTTP 重试也不会增加成功返回的
 主模型次数。终端输入新消息时重置本轮计数；从检查点恢复时保留原计数。
@@ -101,6 +210,7 @@ uv run --locked todo-list-assistant-create-agent
 
 ```text
 .env
+mcp.json
 data/todos.sqlite
 data/todo_checkpoints.sqlite
 ```
@@ -116,11 +226,16 @@ data/todo_checkpoints.sqlite
 
 ```text
 main.py / console.py         资源、菜单、聊天、审批数据
-config/                      app.py、model.py、agent.py
+config/                      app.py、model.py、agent.py、mcp.py
 agent/agent.py               create_agent 与中间件装配
 agent/middleware/            按中间件职责拆分模块
 agent/state.py               自定义字段与历史 reducer
 agent/tools/                 按能力组织工具，__init__.py 统一组装
+agent/skills.py              SKILL.md 加载与校验
+skills/                      随应用提供的技能目录
+agent/mcp.py                 后台事件循环持有 MCP 会话；同步工具包装
+mcp_servers/                 示例 stdio MCP 服务器（番茄钟）
+mcp.example.json             复制为 mcp.json 的示例 MCP 配置
 agent/schemas.py             结构化草案请求与输出模型
 agent/prompts.py             Markdown 提示词加载
 agent/prompt_templates/      模型可见指令
@@ -135,6 +250,7 @@ agent/middleware/
 ├── turn_control.py
 ├── history.py
 ├── context.py
+├── skills.py
 ├── tool_execution.py
 └── draft_presentation.py
 ```
@@ -151,14 +267,15 @@ agent/tools/
 ├── calculator.py
 ├── todos.py
 ├── history.py
-└── draft.py
+├── draft.py
+└── skills.py
 ```
 
-`tools/__init__.py` 定义 `create_tools(model)`，仍然通过
-`from .tools import create_tools` 导入。保存、删除、查询集中在 `todos.py`；
+`tools/__init__.py` 定义 `create_tools(model, skills)`，仍然通过
+`from .tools import create_tools` 导入。只有存在技能时才追加技能工具。保存、删除、查询集中在 `todos.py`；
 `draft.py` 包含绑定模型的草案工具、`DraftGenerator` 和业务校验，
 `schemas.py` 定义 Pydantic 请求与输出模型。
-图的 runtime 注入方式以及工具名称、schema、注册顺序保持一致。
+`ToolRuntime` 由图注入，模型不提供该参数。
 
 建议先读 `agent.py`，再读 `middleware/`、`tools/__init__.py`、`state.py` 和 `tools/draft.py`。
 [对照学习文档](docs/COMPARISON.zh-CN.md)解释执行流程、中间件顺序和与手动图的差异。
@@ -175,5 +292,6 @@ uv tool run --from pyright pyright --pythonpath .venv/bin/python src/agent_apps/
 ```
 
 测试使用假模型、mock HTTP 与临时 SQLite，覆盖实际工厂/中间件流程、审批重启、
-配额、摘要、草案、CRUD 校验、SDK 重试、本地配置与终端编辑。
+配额、摘要、草案、CRUD 校验、技能、MCP（真实本地 stdio 服务器、环境变量字面值、慢关闭／启动清理、
+HTTP 会话创建模拟）、SDK 重试、本地配置与终端编辑。
 这些检查不验证真实供应商行为，也不保证真实模型的工具选择质量。

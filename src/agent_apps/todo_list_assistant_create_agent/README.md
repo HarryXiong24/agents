@@ -43,6 +43,9 @@ English unless another language is requested.
 - “Propose Python and English on 2026-11-16 within 90 minutes.”
 - “Save Python from that draft.” — explicitly saves that proposed record.
 - “Which tools ran, and what were their results?”
+- “Plan my Python study for tomorrow, 2 hours total.” — may load the `study-plan` skill.
+- “Clean up my todo list.” — may load the read-only `todo-cleanup` skill.
+- “Split Python's 70 minutes into pomodoros.” — calls the example MCP server when configured.
 
 These are example requests, not recorded model traces. Actual tool selection and
 wording depend on the configured model.
@@ -59,6 +62,8 @@ wording depend on the configured model.
 | Summaries | Built-in middleware replaces older messages with a summary message |
 | Tool history | Retains the latest 10 completed or declined requests per conversation |
 | Draft arrangement | Dedicated JSON-mode model call; Pydantic and business validation; no writes |
+| Skills | Local `SKILL.md` playbooks; catalog always visible, instructions loaded on request |
+| MCP tools | Servers from local `mcp.json` (stdio or streamable HTTP); approval on by default |
 | Limits | Per-user-turn main-model and admitted-tool quotas, plus graph recursion limit |
 
 Todos are shared across this application's conversations. Messages, proposals,
@@ -71,6 +76,116 @@ It appears once through a return-direct tool and a presentation hook. Ordinary
 conversation remains free text. Creating a new draft clears the old candidate
 before generation; invalid candidates are not retained. Saving a candidate does
 not clear it. It remains a proposal, while the database is the saved-state source.
+
+## Skills
+
+Skills follow the Agent Skills layout: one directory per skill under `skills/`,
+each with a `SKILL.md` that starts with YAML frontmatter.
+
+```text
+skills/
+├── study-plan/
+│   ├── SKILL.md
+│   └── references/session-guide.md
+└── todo-cleanup/
+    └── SKILL.md
+```
+
+```markdown
+---
+name: study-plan            # lowercase/digits/hyphens; must equal the directory
+description: What it does and when to use it (1–1024 characters).
+---
+
+# Markdown instructions for the main model
+```
+
+Skills are disclosed progressively:
+
+| Level | When | Content | Mechanism |
+|---|---|---|---|
+| 1. Catalog | Every main-model call | Name and description of every skill | `SkillsMiddleware.wrap_model_call` |
+| 2. Instructions | After `load_skill(name)` | The `SKILL.md` body | Name stored in `active_skills`, body injected on later calls |
+| 3. References | `read_skill_file(name, path)` | A `references/*.md` or `*.txt` file | Returned as a tool result |
+
+- Skills are loaded once at startup. A malformed skill (frontmatter, name, size,
+  UTF-8, or a reference that resolves outside its directory) stops startup with
+  `Startup failed: ...` rather than being skipped. Edit files and restart to apply.
+- State stores only skill names. Instructions live in the system message, not in
+  `messages`, so summarization does not remove them. They persist per conversation
+  until newer loads push them past `max_active_skills`.
+- `read_skill_file` is enforced to work only for an active skill and a preloaded
+  path; it never touches the disk at call time. Scripts and assets are not loaded
+  or executed.
+- `load_skill` and `read_skill_file` are ordinary tools: each uses one tool slot and
+  one model step, appears in tool history and follows the one-call rule.
+- Skills are prompt guidance from trusted, version-controlled files. They cannot
+  bypass approval, validation or quotas. Without a `skills/` directory, neither
+  skill tool nor the Skills prompt section is registered.
+
+To add a skill, create `skills/<name>/SKILL.md`, optionally add `references/`,
+then restart. Write only reviewed instructions: skill text enters the system prompt.
+
+## MCP servers
+
+Copy the example to enable the bundled, side-effect-free pomodoro server:
+
+```bash
+cp src/agent_apps/todo_list_assistant_create_agent/mcp.example.json src/agent_apps/todo_list_assistant_create_agent/mcp.json
+```
+
+```json
+{
+  "mcpServers": {
+    "pomodoro": {
+      "transport": "stdio",
+      "command": "python",
+      "args": ["-m", "agent_apps.todo_list_assistant_create_agent.mcp_servers.pomodoro"],
+      "require_approval": false
+    },
+    "remote": {
+      "transport": "streamable_http",
+      "url": "https://example.test/mcp",
+      "headers": {"Authorization": "Bearer ${MCP_TOKEN}"},
+      "tools": ["search"],
+      "timeout": 30
+    }
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `transport` | `stdio` (default) or `streamable_http` |
+| `command` / `args` / `env` / `cwd` | stdio process; the literal command `python` is the interpreter running this app |
+| `url` / `headers` | streamable HTTP endpoint |
+| `tools` | Optional allowlist of the server's tool names; omitted means all |
+| `require_approval` | Default `true`: built-in HITL pauses every tool of this server |
+| `timeout` | Seconds for the handshake and for each call (default 30, max 600) |
+
+- `${NAME}` placeholders resolve only from this application's `.env`; a missing
+  value stops startup. Values taken from `.env` are not expanded a second time,
+  so literal `$` and `${NAME}` inside them stay unchanged. Shell variables are
+  not used for substitution. `mcp.json` is Git-ignored.
+- stdio servers receive the MCP SDK's safe default environment (such as `PATH`
+  and `HOME`) plus their own `env`, not the full shell environment.
+- Servers connect once after the conversation menu and stay open until exit.
+  Startup prints `MCP tools: ...`. A server that cannot start, list its tools
+  within `timeout`, or satisfy its allowlist stops startup.
+- On exit, sessions receive 10 seconds to close normally. If cleanup is still
+  pending, the owning task is cancelled and awaited; remaining tasks are also
+  cancelled and awaited before the event loop is closed. Cancellation cleanup
+  may take additional time, so 10 seconds is not a hard total shutdown deadline.
+- Each tool is exposed as `<server>_<tool>`, described as `[MCP server: name]`.
+  Names must be provider-safe and unique among all tools, or startup stops.
+- MCP tools are ordinary tools here: one per model step, counted in the tool
+  quota before approval, recorded in tool history and logged with timing.
+- A server-reported error (`isError`) becomes an error ToolMessage the model can
+  read. Timeouts and transport/session failures raise `McpServerError`; the
+  console reports it and ends the turn. There is no reconnection or retry loop.
+- Results are flattened to text; non-text content is named but not forwarded.
+  The prompt tells the model to treat MCP results as data, not instructions;
+  that is guidance, while approval and quotas are enforced by code.
 
 ## Configuration and persistence
 
@@ -90,6 +205,9 @@ and shell environment variables are not used for these model settings.
 | `tool_history_limit` | `config/agent.py` | 10 records |
 | `approval_tools` | `config/agent.py` | `("delete_todo",)` |
 | `recursion_limit` | `config/agent.py` | 80 graph steps |
+| `max_active_skills` | `config/agent.py` | 2 most recently loaded skills |
+| `SKILLS_DIR` | `config/app.py` | `skills/` in this application |
+| `MCP_FILE` | `config/app.py` | `mcp.json` in this application; absent means no MCP |
 
 Summary and structured-draft model calls are outside the main-model quota.
 SDK HTTP retries do not add successful main-model responses. New console input
@@ -110,6 +228,7 @@ Ignored local files:
 
 ```text
 .env
+mcp.json
 data/todos.sqlite
 data/todo_checkpoints.sqlite
 ```
@@ -128,11 +247,16 @@ SQLite todo writes and graph saves.
 
 ```text
 main.py / console.py         Resources, menu, chat, approval payloads
-config/                      app.py, model.py, agent.py
+config/                      app.py, model.py, agent.py, mcp.py
 agent/agent.py               create_agent and middleware composition
 agent/middleware/            One module per middleware responsibility
 agent/state.py               Custom fields and bounded history reducer
 agent/tools/                 Tools grouped by capability; __init__.py assembles them
+agent/skills.py              SKILL.md loading and validation
+skills/                      Shipped skill directories
+agent/mcp.py                 MCP sessions on a background loop; sync tool wrappers
+mcp_servers/                 Example stdio MCP server (pomodoro)
+mcp.example.json             Example MCP configuration to copy to mcp.json
 agent/schemas.py             Structured draft request and output schemas
 agent/prompts.py             Markdown template loader
 agent/prompt_templates/      Model-visible instructions
@@ -147,6 +271,7 @@ agent/middleware/
 ├── turn_control.py
 ├── history.py
 ├── context.py
+├── skills.py
 ├── tool_execution.py
 └── draft_presentation.py
 ```
@@ -163,14 +288,15 @@ agent/tools/
 ├── calculator.py
 ├── todos.py
 ├── history.py
-└── draft.py
+├── draft.py
+└── skills.py
 ```
 
-`tools/__init__.py` defines `create_tools(model)`, which remains available through
-`from .tools import create_tools`. Save/delete/list stay together in `todos.py`;
+`tools/__init__.py` defines `create_tools(model, skills)`, which remains available through
+`from .tools import create_tools`. Skill tools are appended only when skills exist. Save/delete/list stay together in `todos.py`;
 `draft.py` contains the model-bound draft tool, `DraftGenerator` and business
 validation. `schemas.py` defines the Pydantic request/output models. Graph runtime
-injection and all tool names, schemas and registration order remain unchanged.
+injection supplies `ToolRuntime`; the model never provides it.
 
 Start with `agent.py`, then read `middleware/`, `tools/__init__.py`, `state.py`
 and `tools/draft.py`. See the [comparison guide](docs/COMPARISON.md) for the control flow,
@@ -189,5 +315,7 @@ uv tool run --from pyright pyright --pythonpath .venv/bin/python src/agent_apps/
 
 Tests use fake models, mock HTTP and temporary SQLite files. They cover real
 factory/middleware execution, approvals and restart, quotas, summaries, drafts,
-CRUD validation, SDK retries, local configuration and terminal editing. They do
+CRUD validation, skills, MCP (real local stdio servers, literal env values,
+slow shutdown/startup cleanup and mocked HTTP session creation), SDK retries, local
+configuration and terminal editing. They do
 not verify live provider behavior or the real model's tool-selection quality.

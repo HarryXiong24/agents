@@ -16,6 +16,8 @@ class AgentConfig:
     max_tool_calls_per_turn: int = 8
     tool_history_limit: int = 10
     approval_tools: tuple[str, ...] = ("delete_todo",)
+    # Loaded skill instructions stay in model context; keep only the latest few.
+    max_active_skills: int = 2
 
 
 AGENT_CONFIG = AgentConfig()

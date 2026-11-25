@@ -23,6 +23,7 @@ from langgraph.errors import GraphRecursionError
 from langgraph.types import Command, Interrupt
 
 from .agent.errors import InputTypeError, InputValueError
+from .agent.mcp import McpServerError
 
 
 def describe_api_error(error: APIError) -> str:
@@ -216,6 +217,11 @@ def chat(graph, thread_id: str = "default") -> None:
         except APIError as exc:
             print(
                 f"Assistant: This turn failed. {describe_api_error(exc)} Details: {exc}\n"
+            )
+            break
+        except McpServerError as exc:
+            print(
+                f"Assistant: An MCP server request failed. Check mcp.json and the server. Details: {exc}\n"
             )
             break
         except sqlite3.Error as exc:

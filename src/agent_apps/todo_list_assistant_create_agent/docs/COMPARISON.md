@@ -20,6 +20,8 @@ version and not an in-place replacement of the manual graph.
 | Persistent tool history | Tools node updates State | History hooks collect ToolMessages into custom State |
 | Tool sequencing | Sequential multi-call task execution | One admitted call per model response |
 | Storage and console | Local SQLite, conversation menu | Independent local SQLite, same user-facing concepts |
+| Skills | Not available | `SkillsMiddleware` plus `load_skill` / `read_skill_file` |
+| MCP tools | Not available | `McpConnections` wraps remote tools; HITL by default |
 
 `create_agent` still returns a compiled LangGraph graph. Checkpoints,
 `thread_id`, `Command(resume=...)`, message reducers and tool runtime injection
@@ -36,7 +38,7 @@ flowchart TD
     U[Console input and turn counter reset] --> G[create_agent]
     G --> B[Budget guard and collect tool history]
     B --> S[Built-in summary check]
-    S --> M[Main model with fresh todo and draft context]
+    S --> M[Main model with fresh todo, draft and skill context]
     M --> C[Count response and admit one tool request]
     C -->|Ordinary reply| E[Finish]
     C -->|Multiple requests within quota| R[Decline batch and ask model to reissue singly]
@@ -66,6 +68,7 @@ which checkpoints are saved.
 | `middleware/turn_control.py` | Main-model/tool quotas and one-call admission |
 | `middleware/history.py` | Collect and deduplicate tool history |
 | `middleware/context.py` | Refresh saved todos and draft in model context |
+| `middleware/skills.py` | Append skill catalog and active skill instructions |
 | `middleware/tool_execution.py` | Execution timing and recognized input errors |
 | `middleware/draft_presentation.py` | Present the final draft reply |
 | `middleware/__init__.py` | Export classes without composing them |
@@ -77,8 +80,9 @@ The factory registers:
 3. History collection
 4. Built-in summarization
 5. Dynamic model context
-6. Tool execution observation/error formatting
-7. Draft presentation
+6. Skills disclosure
+7. Tool execution observation/error formatting
+8. Draft presentation
 
 `before_*` hooks run in registration order; `after_*` hooks run in reverse order.
 Therefore budget admission and draft clearing in `TurnControl.after_model` happen
@@ -88,7 +92,9 @@ remove their source messages. `DraftPresentation.after_agent` appends the final
 proposal reply before final history collection.
 
 `wrap_model_call` changes only the model request's system message; it does not
-write dynamic todo context into conversation messages. `wrap_tool_call` observes
+write dynamic todo context into conversation messages. Context is the outer
+wrapper and replaces the system message; Skills is inside it and appends to that
+result. Reversing them would let Context overwrite the skills section. `wrap_tool_call` observes
 one admitted execution. An approval rejection happens before tool execution, so
 it has a retained ToolMessage/history record but no execution timing log.
 
@@ -127,6 +133,65 @@ presentation in `after_agent` preserves that request/result relationship. A
 validation failure also ends this return-direct turn with an explanation; it does
 not ask the main model to repair the draft automatically.
 
+## Skills: progressive disclosure
+
+The manual application has no skills. Here they are composed from the same parts
+as drafts: a registry bound at construction, a name list in State, a tool that
+updates State through `Command`, and a `wrap_model_call` that turns State into
+model context.
+
+1. `main.py` loads `skills/*/SKILL.md` once; `build_agent(..., skills=...)` binds
+   the registry to `SkillsMiddleware` and `create_skill_tools`.
+2. Every main-model call sees the catalog: names and descriptions only.
+3. `load_skill` returns a `Command` adding the name to `active_skills` and a
+   matching ToolMessage. The reducer deduplicates, moves reloads to the end and
+   keeps `max_active_skills`.
+4. Later calls receive the active bodies in the system message. Because they are
+   not messages, summarization cannot remove them; the checkpoint keeps the names.
+5. `read_skill_file` returns preloaded reference text only for active skills.
+
+Choosing an applicable skill is the model's decision (prompt guidance). Valid
+names, file containment, size limits, the active-skill check and every existing
+approval/quota/validation boundary are enforced by code. deepagents ships a
+`SkillsMiddleware` too, but it expects a filesystem backend and `read_file`; this
+application keeps its tool surface small instead.
+
+## MCP: external tools in a synchronous graph
+
+MCP needs no new middleware. Remote tools join the same tool list, so the
+existing hooks already apply: one-call admission, quota before approval,
+history collection and execution logging.
+
+```mermaid
+flowchart LR
+    J[mcp.json + local .env] --> C[McpConfig]
+    C --> L[Background event loop thread]
+    L -->|one owner task| S[MCP sessions]
+    S --> W[Sync McpTool wrappers]
+    W --> F[create_agent tools]
+    W -->|require_approval| H[HITL interrupt_on]
+```
+
+- MCP sessions are async, while this console graph runs with `invoke`. A
+  private loop thread owns every session in one long-lived task, because MCP's
+  anyio scopes must exit in the task that entered them. stdio uses the MCP SDK
+  directly so already-resolved environment values are never expanded from shell
+  variables again; HTTP sessions use `langchain-mcp-adapters`. Each `McpTool` submits
+  `ClientSession.call_tool` to that loop and waits up to the server's timeout.
+- `McpTool` subclasses `BaseTool` with a bare `**arguments` signature. The
+  adapters' `StructuredTool` wrapper would silently drop server arguments named
+  `config` or `run_manager`, which LangChain reserves.
+- Shutdown signals the owning task and waits for normal cleanup. After the
+  10-second grace period, it cancels and awaits that task, then drains remaining
+  tasks before closing the loop. Startup timeouts follow the same cleanup path.
+- Approval names are derived from the wrapped tools' metadata at build time and
+  merged with `approval_tools`, so HITL protects MCP tools before execution.
+- Errors are split as elsewhere: a server-reported `isError` result is a
+  model-visible error ToolMessage; timeouts and transport failures propagate as
+  `McpServerError`. Startup fails fast instead of skipping a server.
+- Treating MCP output as data rather than instructions is prompt guidance. Code
+  enforces approval, quotas, the allowlist and unique tool names.
+
 ## Deliberate differences and limits
 
 - This implementation enforces one tool per model response, avoiding the
@@ -160,7 +225,8 @@ a deletion rejected with `n`; exiting approval then reopening the conversation;
 a valid draft followed by explicit saving; a low summary trigger. These are
 exercises, not claims of live-model verification.
 
-For deterministic inspection, read/run `tests/test_agent.py`. Its fake model
+For deterministic inspection, read/run `tests/test_factory.py`,
+`tests/test_skills.py` and `tests/test_mcp.py` (real local stdio servers). Their fake model
 executes the real factory graph, middleware, approvals, State updates and tools.
 `test_errors.py` uses mock HTTP for SDK retries; other tests cover configuration,
 CRUD and a real pseudo-terminal. Tests never use personal databases or real keys.

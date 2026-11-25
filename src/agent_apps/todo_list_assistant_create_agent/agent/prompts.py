@@ -1,9 +1,11 @@
 """Load templates for chat, saved todos, summaries, and draft generation."""
 
 import json
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from .memory import TodoItem
+from .skills import Skill
 
 # Keep Markdown assets separate from the Python prompt loader.
 PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parent / "prompt_templates"
@@ -22,6 +24,9 @@ SUMMARY_PROMPT = (
 )
 DRAFT_PROMPT = (
     (PROMPT_TEMPLATES_DIR / "draft_prompt.md").read_text(encoding="utf-8").strip()
+)
+SKILLS_PROMPT = (
+    (PROMPT_TEMPLATES_DIR / "skills_prompt.md").read_text(encoding="utf-8").strip()
 )
 
 
@@ -49,3 +54,23 @@ def build_system_prompt(todos: list[TodoItem], todo_draft: dict | None = None) -
             "as current. Clarify ambiguous draft references before saving."
         )
     return system
+
+
+def build_skills_prompt(skills: Mapping[str, Skill], active: Sequence[str]) -> str:
+    """List every skill's metadata; include full text only for active skills."""
+    catalog = "\n".join(
+        f"- `{skill.name}`: {skill.description}" for skill in skills.values()
+    )
+    # Only the template's {catalog} is replaced; braces in skill text stay literal.
+    prompt = SKILLS_PROMPT.format(catalog=catalog)
+    sections = []
+    for name in active:
+        skill = skills[name]
+        section = f"## Skill: {skill.name}\n\n{skill.instructions}"
+        if skill.resources:
+            files = ", ".join(f"`{path}`" for path in skill.resources)
+            section += f"\n\nFiles for read_skill_file: {files}"
+        sections.append(section)
+    if sections:
+        prompt += "\n\n# Active skill instructions\n\n" + "\n\n".join(sections)
+    return prompt

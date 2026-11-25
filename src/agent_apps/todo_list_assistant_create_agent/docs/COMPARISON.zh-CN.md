@@ -19,6 +19,8 @@
 | 持久化工具历史 | 工具节点更新 State | 历史 hooks 收集 ToolMessage 到自定义 State |
 | 工具顺序 | 顺序执行同批多个工具的 task | 每次模型响应只准入一个工具 |
 | 存储与终端 | 本地 SQLite、会话菜单 | 独立本地 SQLite，保留同类使用方式 |
+| 技能 | 不支持 | `SkillsMiddleware` 与 `load_skill` / `read_skill_file` |
+| MCP 工具 | 不支持 | `McpConnections` 包装远程工具；默认 HITL |
 
 `create_agent` 返回的仍然是编译后的 LangGraph 图，所以检查点、`thread_id`、
 `Command(resume=...)`、消息 reducer 与工具 runtime 注入仍然适用。
@@ -34,7 +36,7 @@ flowchart TD
     U[终端输入并重置本轮计数] --> G[create_agent]
     G --> B[模型配额检查与工具历史收集]
     B --> S[内置摘要检查]
-    S --> M[主模型与最新待办和草案上下文]
+    S --> M[主模型与最新待办、草案和技能上下文]
     M --> C[响应计数与单工具准入]
     C -->|普通回答| E[结束]
     C -->|配额内的多个请求| R[拒绝整批并让模型逐个重发]
@@ -63,6 +65,7 @@ flowchart TD
 | `middleware/turn_control.py` | 主模型/工具配额与单工具准入 |
 | `middleware/history.py` | 工具历史收集与去重 |
 | `middleware/context.py` | 刷新模型上下文中的待办与草案 |
+| `middleware/skills.py` | 追加技能目录与已激活技能指令 |
 | `middleware/tool_execution.py` | 执行耗时与明确的输入错误处理 |
 | `middleware/draft_presentation.py` | 展示最终草案回答 |
 | `middleware/__init__.py` | 统一导出类，不负责组合 |
@@ -74,8 +77,9 @@ flowchart TD
 3. 工具历史收集
 4. 内置摘要
 5. 动态模型上下文
-6. 工具执行观察与输入错误格式化
-7. 草案展示
+6. 技能披露
+7. 工具执行观察与输入错误格式化
+8. 草案展示
 
 `before_*` 按注册顺序执行，`after_*` 反序执行。因此
 `TurnControl.after_model` 的配额检查和旧草案清空会**先于** HITL 中断。
@@ -84,7 +88,8 @@ flowchart TD
 `DraftPresentation.after_agent` 先追加最终草案回答，再进行最终历史收集。
 
 `wrap_model_call` 只替换这次模型请求的 system message，不把动态待办上下文写进
-聊天消息。`wrap_tool_call` 观察一次准入后的真实执行。审批拒绝发生在工具执行前，
+聊天消息。Context 是外层并替换 system message；Skills 在内层，在其结果上追加。
+顺序反过来，Context 会覆盖技能段落。`wrap_tool_call` 观察一次准入后的真实执行。审批拒绝发生在工具执行前，
 因此会有拒绝 ToolMessage 和历史记录，但没有工具执行耗时日志。
 
 ## State 与结构化输出
@@ -116,6 +121,55 @@ flowchart TD
 将展示放在 `after_agent`，可以保留原请求/结果关系。
 校验失败同样直接结束本轮并解释原因，不自动交给主模型修复草案。
 
+## 技能：渐进式披露
+
+手动应用没有技能。这里用与草案相同的组件组合：构造时绑定的注册表、State 中的
+名称列表、通过 `Command` 更新 State 的工具，以及把 State 转为模型上下文的
+`wrap_model_call`。
+
+1. `main.py` 一次性加载 `skills/*/SKILL.md`；`build_agent(..., skills=...)` 把注册表
+   绑定给 `SkillsMiddleware` 与 `create_skill_tools`。
+2. 每次主模型调用都能看到目录：只有名称与描述。
+3. `load_skill` 返回 `Command`，把名称加入 `active_skills` 并附带匹配的 ToolMessage。
+   reducer 去重、把重新加载的技能移到末尾，并保留 `max_active_skills` 个。
+4. 后续调用在 system message 中收到已激活技能正文。它们不是消息，因此摘要不会
+   删除；检查点保存名称。
+5. `read_skill_file` 只为已激活技能返回预加载的参考文本。
+
+是否选用某个技能由模型决定（prompt 引导）。合法名称、文件不越界、大小限制、
+激活检查，以及原有审批/配额/校验边界都由代码强制执行。deepagents 也提供
+`SkillsMiddleware`，但它依赖文件系统后端与 `read_file`；本应用选择保持更小的工具面。
+
+## MCP：同步图中的外部工具
+
+MCP 不需要新中间件。远程工具加入同一个工具列表，现有 hooks 自然生效：
+单工具准入、配额先于审批、历史收集与执行日志。
+
+```mermaid
+flowchart LR
+    J[mcp.json + 本地 .env] --> C[McpConfig]
+    C --> L[后台事件循环线程]
+    L -->|单一持有 task| S[MCP 会话]
+    S --> W[同步 McpTool 包装]
+    W --> F[create_agent 工具]
+    W -->|require_approval| H[HITL interrupt_on]
+```
+
+- MCP 会话是异步的，而终端图使用 `invoke`。私有事件循环线程在一个长期 task 中
+  持有所有会话，因为 MCP 的 anyio scope 必须在进入它的 task 中退出。
+  stdio 直接使用 MCP SDK，避免已解析的环境值再次从 shell 变量展开；
+  HTTP 会话由 `langchain-mcp-adapters` 创建。每个 `McpTool` 把
+  `ClientSession.call_tool` 提交到该循环，并最多等待服务器的 timeout。
+- `McpTool` 继承 `BaseTool`，只使用 `**arguments` 签名。适配器的 `StructuredTool`
+  包装会悄悄丢弃名为 `config` 或 `run_manager` 的服务器参数（LangChain 保留了这两个名字）。
+- 关闭时先通知所属任务并等待正常清理；超过 10 秒等待期则取消并等待该任务收尾，
+  再取消并等待其余任务，最后关闭循环。启动超时也使用这条清理路径。
+- 审批名称在构建时从包装工具的 metadata 推导，并与 `approval_tools` 合并，
+  因此 HITL 在执行前保护 MCP 工具。
+- 错误划分与其他部分一致：服务器报告的 `isError` 结果是模型可见的错误 ToolMessage；
+  超时与传输故障作为 `McpServerError` 向上抛出。启动失败直接停止，不跳过服务器。
+- 把 MCP 输出当作数据而非指令是 prompt 引导；审批、配额、白名单和唯一工具名由代码强制。
+
 ## 有意保留的差异与限制
 
 - 当前实现强制一次模型响应只请求一个工具，避开工厂默认的并行派发。
@@ -142,7 +196,8 @@ flowchart TD
 重新打开会话；生成合法草案后明确保存；调低摘要阈值。
 这些是练习建议，不表示已经验证真实模型效果。
 
-要确定性地观察流程，阅读并运行 `tests/test_agent.py`。
+要确定性地观察流程，阅读并运行 `tests/test_factory.py`、`tests/test_skills.py` 与
+`tests/test_mcp.py`（真实本地 stdio 服务器）。
 假模型驱动的是真实工厂图、中间件、审批、State 更新和工具。
 `test_errors.py` 用 mock HTTP 检查 SDK 重试，其他测试覆盖配置、CRUD 与真实伪终端。
 测试不使用个人数据库或真实 key。
