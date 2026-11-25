@@ -20,8 +20,8 @@ version and not an in-place replacement of the manual graph.
 | Persistent tool history | Tools node updates State | History hooks collect ToolMessages into custom State |
 | Tool sequencing | Sequential multi-call task execution | One admitted call per model response |
 | Storage and console | Local SQLite, conversation menu | Independent local SQLite, same user-facing concepts |
-| Skills | Not available | `SkillsMiddleware` plus `load_skill` / `read_skill_file` |
-| MCP tools | Not available | `McpConnections` wraps remote tools; HITL by default |
+| Skills | ModelNode context and tools-node activation updates | `SkillsMiddleware` plus `load_skill` / `read_skill_file` |
+| MCP tools | McpConnections plus per-call approval wrapper | `McpConnections` wraps remote tools; HITL by default |
 
 `create_agent` still returns a compiled LangGraph graph. Checkpoints,
 `thread_id`, `Command(resume=...)`, message reducers and tool runtime injection
@@ -135,8 +135,8 @@ not ask the main model to repair the draft automatically.
 
 ## Skills: progressive disclosure
 
-The manual application has no skills. Here they are composed from the same parts
-as drafts: a registry bound at construction, a name list in State, a tool that
+The manual application injects skills in ModelNode and commits accepted-name
+artifacts in ToolsNode. Here they are composed from the same parts as drafts: a registry bound at construction, a name list in State, a tool that
 updates State through `Command`, and a `wrap_model_call` that turns State into
 model context.
 

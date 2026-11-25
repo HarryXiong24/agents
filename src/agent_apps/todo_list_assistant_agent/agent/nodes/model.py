@@ -1,5 +1,6 @@
 """Call the tool-enabled model and route its response to tools or turn completion."""
 
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, SystemMessage
@@ -7,16 +8,23 @@ from langchain_core.runnables import Runnable
 
 from ...config import AgentConfig
 from .. import memory
-from ..prompts import build_system_prompt
+from ..prompts import build_skills_prompt, build_system_prompt
+from ..skills import Skill
 from ..state import AgentState
 
 
 class ModelNode:
     """Keep a tool-bound model available for every execution of the model step."""
 
-    def __init__(self, model: Runnable, agent_config: AgentConfig) -> None:
+    def __init__(
+        self,
+        model: Runnable,
+        agent_config: AgentConfig,
+        skills: Mapping[str, Skill] | None = None,
+    ) -> None:
         self._model = model
         self._agent_config = agent_config
+        self._skills = dict(skills or {})
 
     def model(self, state: AgentState) -> dict[str, Any]:
         """Return the model's next message using current todos and conversation context."""
@@ -38,6 +46,12 @@ class ModelNode:
         system = build_system_prompt(
             todos, state.get("summary", ""), state.get("todo_draft")
         )
+        if self._skills:
+            # State keeps names, while fixed resources keep the current skill text.
+            active = [
+                name for name in state.get("active_skills", []) if name in self._skills
+            ]
+            system += "\n\n" + build_skills_prompt(self._skills, active)
         # Send system instructions with each request without appending to history.
         response = self._model.invoke([SystemMessage(system), *state["messages"]])
         # MessagesState appends new message IDs and replaces matching IDs.

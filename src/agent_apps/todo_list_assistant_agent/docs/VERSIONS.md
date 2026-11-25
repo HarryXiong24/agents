@@ -14,25 +14,27 @@ English | [简体中文](VERSIONS.zh-CN.md)
 | V6 | Custom tool-history reducer, execution records, history queries, and an `agent/` package with a central configuration entry point | Incremental State updates, runtime injection, persistence, and model access to custom state |
 | V7 | Tool observation, human approval, middleware composition, and checkpointed per-call recovery | Wrappers, `interrupt`, `Command(resume=...)`, terminal decisions, and durable tasks |
 | V8 | Structured todo drafts, business validation, checkpointed candidates, ordinary list queries and natural replies | Model JSON output versus local validation, user constraints, separate draft/saved data and fixed node dependencies |
-| V9 (current) | Basic ReAct call limits, error classification, SDK-only model retries and graceful exits in existing nodes | State counters, protocol pairing, known input versus operational errors, bounded SDK retries and completed-call semantics |
+| V9 | Basic ReAct call limits, error classification, SDK-only model retries and graceful exits in existing nodes | State counters, protocol pairing, known input versus operational errors, bounded SDK retries and completed-call semantics |
+| V10 | MCP servers, local configuration, sync wrappers and existing approval/task recovery | Protocol versus tools, resource lifetime, external errors and durable per-call results |
+| V11 (current) | Local skills, progressive disclosure, active names and reference lookup | Fixed registry versus State, marker artifacts, reducers and model context |
 
 This document records what each version teaches, what it adds, and how to verify it. Append the same information when a future version adds another building block.
 
-The running code is **version 9**, with basic per-turn call limits, classified errors, SDK retries and structured
-todo drafts, while ordinary replies remain natural text. Earlier versions describe learning
-history rather than separate runnable folders.
+The running code is **version 11**, including MCP external tools and local Skills,
+with the existing summaries, todo drafts, call limits and checkpointed conversations.
+Earlier versions describe learning history rather than separate runnable folders.
 
 Code, prompts, tool descriptions, and terminal messages use English. The assistant replies in English by default, with another language available on explicit request. Exit with `exit` or `quit`.
 
-Current Agent execution and persistence modules live under `agent/`, with startup, console, and shared configuration at the application root. Earlier sections retain their historical paths; use the current README layout and version 9's `agent/nodes/` modules when navigating source.
+Current Agent execution and persistence modules live under `agent/`, with startup, console, and shared configuration at the application root. Earlier sections retain their historical paths; use the current README layout and the `agent/nodes/`, `agent/tools/` and MCP/skill modules when navigating source.
 
 Diagrams show components and data flow. Versions 1-4 have **Model node** and **Tool node**; version 5 adds **Summary node**. Version 6 keeps those three nodes and adds custom state processing inside the tools step. Version 7 adds wrappers inside `ToolNode` without adding nodes; version 8 adds a fourth draft node for structured generation and validation; version 9 keeps those four nodes and adds internal call-limit checks. Storage helpers
 and the console are ordinary Python functions.
 
-### Current source layout within version 9
+### Current source layout
 
-Tools and tool-call wrappers are now packages. This is a layout refactor within
-the current version; node/task names, tool contracts, approval order, checkpoints
+Tools and tool-call wrappers are now packages. The package layout was introduced during
+version 9; node/task names, tool contracts, approval order, checkpoints
 and todo data paths are unchanged. Earlier sections retain historical filenames.
 Use this mapping when following their examples in the current source:
 
@@ -1598,21 +1600,223 @@ Independent review found implicit Pydantic conversion of durations before the st
 type check (for example, True becoming 1). This was corrected with StrictInt and four
 regressions proving no write occurs for True, False, "30", or 30.0 through ToolNode.
 
-## Confirmed learning roadmap (planned)
+## Version 10: MCP tools in the existing graph
 
-The user confirmed the following learning order on 2026-11-06. These are planned
-topics, not implemented features. Basic error classification and SDK retries from
-the original version 10 proposal were merged into version 9 by user request; no
-version 10 was created. The original version 11 streaming topic remains planned.
-Any renumbering or further retry scope awaits a later user decision.
+### Learning goal
 
-| Planned version | Main topic | Intended learning scope |
-|---|---|---|
-| V11 | Streaming interaction | Incrementally display model replies, tool progress, and approval events; distinguish streamed events from final State and preserved checkpoints |
+Expose tools implemented by an external process or HTTP MCP server through the
+same ReAct loop. Distinguish transport/session resources, model-visible tool
+schemas, per-call approval and checkpointed task results.
 
-Continue with one main building block per version and keep both language editions,
-component diagrams, examples, and verification records synchronized. Later topics
-are outside this confirmed roadmap until the user chooses them.
+### Scope and boundaries
+
+The graph still has `summarize`, `model`, `tools` and `draft`. MCP adds tools, not
+nodes. Existing SQLite todo/checkpoint paths and records are unchanged. Configuring
+no `mcp.json` gives the existing local-tool behavior. Nothing is migrated from the
+sibling create_agent application.
+
+Servers support stdio and streamable HTTP. Each server can allowlist tools and
+requires approval by default. The bundled pomodoro server is read-only and the
+example explicitly disables approval for it. External output is data; treating it
+as such is prompt guidance, while approvals, names/allowlists and quotas are code.
+
+### Component diagram
+
+```mermaid
+flowchart TD
+    J[Local mcp.json and .env] --> C[config/mcp.py]
+    C --> L[main.py opens McpConnections]
+    L --> P[Private loop and owning task]
+    P --> S[MCP sessions]
+    S --> W[Sync McpTool wrappers]
+    B[Local tool registry] --> G[graph.py shared tool list]
+    W --> G
+    G --> M[Existing model node]
+    G --> T[Existing tools node and execute_tool tasks]
+    M -->|tool requests| T
+    T --> A[Approval then observation then execution]
+    A -->|MCP call| P
+    T --> H[History and completed batch usage]
+    T -. completed task result .-> Q[SQLite checkpoints]
+```
+
+These boxes include resources/helpers; they are not all graph nodes.
+
+### Changed components and reading order
+
+| Module | Responsibility |
+|---|---|
+| `config/mcp.py`, `config/app.py` | Validate server settings; resolve `${NAME}` once from the local .env |
+| `mcp.example.json`, `mcp_servers/pomodoro.py` | Shareable opt-in configuration and a local test server |
+| `agent/mcp.py` | Resource lifetime, paginated discovery, prefixed names, text results and sync wrappers |
+| `main.py` | Open resources after the menu and keep them open throughout chat |
+| `agent/graph.py` | Supply the same combined tool list to model binding and ToolNode |
+| `agent/middleware/approval.py` | Protect MCP calls using server metadata, as well as configured local tools |
+| `console.py` | Explain transport errors and leave checkpoints available for later recovery |
+
+Read configuration → McpConnections → graph assembly → approval wrapper → existing
+`nodes/tools.py` tasks → console. `build_graph(model, saver, mcp_tools=tools)` binds
+live tools through the executor closure, never as serialized task arguments.
+
+### Session lifetime and error behavior
+
+`McpConnections` owns a background event loop, while the graph uses synchronous
+`invoke`. One owner task opens and closes every session, preserving anyio scope
+ownership. Wrappers submit `ClientSession.call_tool` to that loop. stdio uses the
+MCP SDK directly so environment values already resolved locally stay literal;
+HTTP session creation uses the adapter. Shell values never re-expand stdio env.
+
+Startup and individual calls have configured timeouts. On close, the owner gets
+10 seconds for normal cleanup, then is cancelled and awaited; remaining tasks are
+also drained before loop closure. Cancellation cleanup may add time. No tasks are
+silently discarded. Server-reported `isError` becomes an error ToolMessage;
+transport/timeouts propagate as McpServerError. No reconnect or tool retry loop is
+added. A remote server may already have performed a side effect before a timeout.
+
+A batch is checked before any approval/execution. Existing per-call `@task`
+results are durable: a restart before a later approval reuses earlier completed
+remote results with newly opened sessions for unfinished calls. Usage/history
+commit once when the whole batch completes. This does not guarantee exactly-once
+remote side effects across a process failure before a result was checkpointed.
+
+### Exercises
+
+1. Copy this application's `mcp.example.json` to `mcp.json`, then ask to split 70
+   minutes into pomodoros. Find `pomodoro_plan_pomodoros` in the exposed tools.
+2. Enable `require_approval`, reject a call, and verify there is no execution log.
+3. Ask for two remote calls in one batch using a fake model; approve the first,
+   exit at the second approval, restart, and inspect task-result reuse.
+4. Configure a missing allowlisted tool or invalid command and inspect startup
+   failure. Try the timeout test using its isolated temporary server.
+
+### Verification
+
+```bash
+.venv/bin/python -m pytest -q src/agent_apps/todo_list_assistant_agent/tests/test_mcp.py -W error
+```
+
+MCP tests cover local stdio discovery/calls, naming and allowlists, default approval
+and opt-out, known server errors, call/startup timeouts, shutdown cleanup, literal
+environment values, reserved argument names, HTTP session creation through a mock,
+console classification and restarted partial-batch reuse. Real Groq or remote HTTP
+MCP interoperability is not verified by these offline tests.
+
+## Version 11: Skills and progressive disclosure
+
+### Learning goal
+
+Teach a recurring workflow without adding another agent or graph node. Separate
+metadata discovery, instruction activation, reference lookup, persisted names and
+model-visible context. Apply a custom reducer to a new State field.
+
+### Scope and boundaries
+
+Trusted, version-controlled `skills/<name>/SKILL.md` directories are loaded once
+at startup. The included `study-plan` and read-only `todo-cleanup` skills use the
+existing tools. The loader accepts YAML metadata plus Markdown instructions and
+bounded UTF-8 text under `references/`; it does not execute scripts or assets.
+No skill directory means no skill tools or catalog. Invalid skills stop startup.
+
+The registry is a fixed dependency of ModelNode and the bound skill tools. It is
+not a client/registry object stored in State. `active_skills` contains only names
+and stays independent of message compression. Skill text cannot authorize writes
+or bypass tool validation, human approval or per-turn quotas.
+
+### Component diagram
+
+```mermaid
+flowchart TD
+    F[skills/name/SKILL.md and references] --> R[Startup loader and fixed registry]
+    R --> M[Existing model node: catalog plus active bodies]
+    R --> B[Bound load_skill and read_skill_file tools]
+    M -->|load_skill alone| T[Existing tools node]
+    T --> E[execute_tool task]
+    E --> A[ToolMessage with accepted-name artifact]
+    A --> U[ToolsNode incremental active_skills update]
+    U --> D[Reducer: deduplicate and keep recent names]
+    D --> S[AgentState and SQLite checkpoints]
+    S --> M
+    M -->|read_skill_file later| B
+    B --> X[Preloaded reference text as tool result]
+    S -. names survive RemoveMessage .-> M
+```
+
+The four registered graph nodes and the `execute_tool` task name remain unchanged.
+
+### Changed components and reading order
+
+| Module | Responsibility |
+|---|---|
+| `agent/skills.py`, `skills/` | Load/validate trusted metadata, instructions and contained text references |
+| `agent/tools/skills.py` | Accepted load marker and active-skill reference lookup |
+| `agent/tools/__init__.py` | `create_tools(skills)` appends bound skill tools to the base TOOLS list |
+| `agent/state.py` | `active_skills` plus deduplicating, recent-name reducer |
+| `agent/nodes/tools.py` | Reject mixed load batches; return accepted names only after completion |
+| `agent/nodes/model.py`, `agent/prompts.py` | Catalog on every main call; active bodies in system context |
+| `config/agent.py`, `main.py` | max_active_skills=2, startup registry assembly |
+
+Read loader → tools → State/reducer → tools node → model node/prompt builder →
+startup. This order follows data from a file to an accepted name, persistent State
+and then the next model request.
+
+### State update and runtime behavior
+
+`load_skill` returns `(text, {"skill_name": name})` using content-and-artifact.
+ToolNode creates the matching ToolMessage, and the existing task checkpoints it.
+After the batch completes, ToolsNode returns `{"active_skills": [name]}`. The
+reducer merges with existing names, moves reloads to the end and retains the
+latest `max_active_skills`. It never writes instruction text into this field.
+
+Loading must be alone in its batch. Otherwise ToolsNode declines the whole batch
+before writes/approval: tools in a batch read pre-batch runtime State, so a file
+lookup in the same batch cannot rely on a newly activated name. Other normal
+batches keep their sequential behavior. Skill requests use the existing quota,
+history and error policy. Activation itself never changes the todo database.
+
+`read_skill_file(name, path, runtime)` reads the active names from graph-injected
+runtime State. The model supplies name/path only; lookup uses the preloaded map,
+not arbitrary disk paths. The file text is a normal tool result and can later be
+summarized. In contrast, each active instruction body is rebuilt from the fixed
+registry on every model request. Removing a skill on disk and restarting stops
+its text being injected; names are filtered against the current registry.
+
+### Exercises
+
+1. Ask for a study draft with an explicit date and minute budget. Observe catalog
+   discovery, `load_skill`, `read_skill_file`, then the existing draft branch.
+2. Inspect active_skills in a checkpoint; find names rather than Skill objects or
+   instruction bodies. Restart and verify the body reaches the next model call.
+3. Load three skills with max_active_skills=2, then reload one. Follow reducer order.
+4. Trigger a summary and confirm the active skill remains injected after its
+   original load messages have been removed.
+5. Ask for todo cleanup; suggestions are read-only. A later explicit deletion
+   still pauses for human approval. Selection/following is model guidance.
+
+### Verification
+
+```bash
+.venv/bin/python -m pytest -q src/agent_apps/todo_list_assistant_agent/tests/test_skills.py -W error
+.venv/bin/python -m pytest -q src/agent_apps/todo_list_assistant_agent/tests -W error
+.venv/bin/ruff check src/agent_apps/todo_list_assistant_agent
+.venv/bin/ruff format --check src/agent_apps/todo_list_assistant_agent
+uv tool run --from pyright pyright --pythonpath .venv/bin/python src/agent_apps/todo_list_assistant_agent
+```
+
+Tests cover malformed/escaping files, shipped skills, progressive disclosure,
+hidden runtime inputs, active-reference access, unknown paths, bounded activation,
+mixed-load rejection, quotas, delete approval and names surviving restart/summary.
+They use fake models and temporary SQLite files; real-model skill selection is not
+claimed as verified. Current application suite: **297 passed** (28 MCP and 25
+skill-specific tests, with the 244 earlier regressions still passing). Joint suite
+with the create_agent application: **453 passed**. Ruff lint/format and Pyright
+checks pass. Tests do not read personal MCP configuration, secrets or databases.
+
+## Learning roadmap status
+
+On 2026-11-24 the user assigned MCP to V10 and Skills to V11; both are implemented
+above. The older proposal to use V11 for streaming is superseded. Streaming is
+still unimplemented and has no confirmed version number. Do not assign another
+number or present it as available until the user chooses the next topic.
 
 ## Recording future versions
 

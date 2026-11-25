@@ -127,9 +127,22 @@ implementation before describing behavior; preserve unrelated user changes.
   in `middleware/tool_execution.py`, and composition/public exports in
   `middleware/__init__.py`. Keep approval outside observation and preserve
   graph/task registration names, tool contracts and persisted-data paths.
+- MCP connections/configuration live in `agent/mcp.py` and `config/mcp.py`.
+  `main.py` opens only this app's ignored `mcp.json`, keeps sessions open for chat,
+  and reserves local tool names. Preserve literal stdio env values; finish task
+  cleanup before closing the loop. External tools require approval by default.
+- Load trusted `skills/<name>/SKILL.md` directories once at startup. Bind the registry
+  to ModelNode and skill tools; persist only activation names. The load tool returns
+  a marker artifact, and ToolsNode produces the active_skills State update. Reject
+  mixed load_skill batches before effects. Keep all four nodes and task names;
+  preserve quota, summary, history and checkpoint-replay semantics. Skill instructions
+  guide the model and cannot bypass validation, approval or quotas.
+- Tests must not open a developer's personal MCP configuration, secrets or databases.
+  Use temporary config/storage and fake models/local stdio servers or mock HTTP.
 - Treat `config/` as the configuration entry point, with a public API in
   `config/__init__.py` and environment-file reading confined to `config/app.py`.
-  Group settings into `agent.py`, `model.py`, and `app.py`; keep `__init__.py`
+  Group core settings into `agent.py`, `model.py`, and `app.py`, with MCP schema
+  parsing in `mcp.py`; keep `__init__.py`
   limited to re-exports. Define `AgentConfig` and `ModelConfig` in their respective
   modules, and `AppConfig` plus loading/assembly functions in `app.py`. Keep model
   environment-file reads, defaults, parsing, and validation in this package. Define
@@ -233,8 +246,18 @@ implementation before describing behavior; preserve unrelated user changes.
   人工审批在 `middleware/approval.py`，观察与错误格式化在 `middleware/tool_execution.py`，
   组合与公开导出在 `middleware/__init__.py`。保持审批位于观察外层，
   保持图／任务注册名称、工具契约与持久化数据路径不变。
+- MCP 连接与配置分别在 `agent/mcp.py`、`config/mcp.py`；`main.py` 只读取本应用被忽略的
+  `mcp.json`，在聊天期间保持会话打开，并预留本地工具名称。stdio env 保留字面值，
+  关闭循环前完成任务清理；外部工具默认需要审批。
+- 启动时一次加载受信任的 `skills/<name>/SKILL.md`，注册表绑定 ModelNode 和技能工具，
+  只持久化激活名称。加载工具返回标记 artifact，ToolsNode 产生 active_skills 更新；
+  副作用前拒绝混合 load_skill 批次。保持四个节点与任务名称，以及配额、摘要、历史和回放语义。
+  技能指令引导模型，不绕过校验、审批或配额。
+- 测试不得打开开发者个人 MCP 配置、密钥或数据库，使用临时配置／存储、假模型、
+  本地 stdio 测试服务器或 mock HTTP。
 - `config/` 是配置统一入口，由 `config/__init__.py` 提供公开 API，
-  环境文件读取集中在 `config/app.py`，按 `agent.py`、`model.py`、`app.py` 三类组织；
+  环境文件读取集中在 `config/app.py`，核心配置按 `agent.py`、`model.py`、`app.py` 组织，
+  MCP schema 与解析放在 `mcp.py`；
   `__init__.py` 只重新导出接口，各自模块定义 `AgentConfig` 和 `ModelConfig`，
   `app.py` 定义 `AppConfig` 及读取、组装函数，统一管理模型配置的读取、默认值、解析和校验。
   Agent 参数直接在 `AgentConfig` 中定义，不添加独立 Agent 加载函数或环境变量。

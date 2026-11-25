@@ -1,8 +1,14 @@
 """Assemble and export the local tools shared by the model and tool node."""
 
+from collections.abc import Mapping
+
+from langchain_core.tools import BaseTool
+
+from ..skills import Skill
 from .calculator import calculate
 from .draft import generate_todo_draft
 from .history import get_tool_history
+from .skills import create_skill_tools
 from .time import get_current_time
 from .todos import delete_todo, list_todos, save_todo
 
@@ -18,7 +24,17 @@ TOOLS = [
     get_tool_history,
 ]
 
+
+def create_tools(skills: Mapping[str, Skill] | None = None) -> list[BaseTool]:
+    """Keep base registration order and append tools for the supplied skills."""
+    tools: list[BaseTool] = list(TOOLS)
+    if skills:
+        tools.extend(create_skill_tools(skills))
+    return tools
+
+
 __all__ = [
+    "create_tools",
     "TOOLS",
     "calculate",
     "delete_todo",

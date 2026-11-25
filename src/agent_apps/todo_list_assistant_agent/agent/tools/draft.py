@@ -15,8 +15,9 @@ def generate_todo_draft(
     """Request an unsaved arrangement for named tasks on one date within a time budget.
 
     Use when the user wants proposed durations or an arrangement draft, not saving.
-    Copy distinct task names, date and total time limit from the user's requirements;
-    ask if any are missing. Resolve relative dates with the time tool first.
+    Preserve explicit task names, date and total time limit from the user's requirements.
+    A loaded planning skill may derive session names from a broad user goal.
+    Ask for any missing date or budget. Resolve relative dates with the time tool first.
     max_minutes is the total budget for this draft, from 1 to 1440 minutes.
     Call this tool alone in its batch. The graph's draft node generates and checks
     the proposal next, then ends the turn with one displayed draft. Nothing is saved

@@ -1,13 +1,17 @@
 """Compose checkpoint storage, console interaction, the model, and the graph."""
 
 import sqlite3
+from contextlib import ExitStack
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from .agent import checkpoints
 from .agent.graph import build_graph
+from .agent.mcp import McpConnections, McpServerError
 from .agent.model import create_model
-from .config import load_config
+from .agent.skills import load_skills
+from .agent.tools import create_tools
+from .config import SKILLS_DIR, load_config
 from .console import chat, select_thread
 
 
@@ -29,13 +33,28 @@ def main() -> None:
             try:
                 settings = load_config()
                 model = create_model(settings.model)
+                # A malformed skill is a SkillLoadError (a ValueError) and stops here.
+                skills = load_skills(SKILLS_DIR)
             except (OSError, ValueError) as exc:
                 raise SystemExit(f"Startup failed: {exc}") from exc
 
-            # init graph
-            graph = build_graph(model, checkpointer=checkpointer)
-            # begin chat
-            chat(graph, thread_id=thread_id)
+            # MCP sessions stay open for the whole chat and close on exit.
+            reserved = frozenset(tool.name for tool in create_tools(skills))
+            with ExitStack() as resources:
+                try:
+                    mcp_tools = resources.enter_context(
+                        McpConnections(settings.mcp, reserved_names=reserved)
+                    )
+                except McpServerError as exc:
+                    raise SystemExit(f"Startup failed: {exc}") from exc
+                if mcp_tools:
+                    print(f"MCP tools: {', '.join(tool.name for tool in mcp_tools)}")
+                # Build the standard loop with middleware.
+                graph = build_graph(
+                    model, checkpointer=checkpointer, skills=skills, mcp_tools=mcp_tools
+                )
+                # begin chat
+                chat(graph, thread_id=thread_id)
     except (EOFError, KeyboardInterrupt):
         print("\nGoodbye!")
     except (OSError, sqlite3.Error) as exc:

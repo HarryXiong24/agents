@@ -30,6 +30,13 @@ def add_tool_history(
     return (old + new)[-agent_settings.AGENT_CONFIG.tool_history_limit :]
 
 
+def add_active_skills(old: list[str], new: list[str]) -> list[str]:
+    """Move reloaded skills to the end and keep only the most recent ones."""
+    merged = [name for name in old if name not in new] + list(dict.fromkeys(new))
+    limit = agent_settings.AGENT_CONFIG.max_active_skills
+    return merged[-limit:] if limit > 0 else []
+
+
 class AgentState(MessagesState):
     """Conversation data, latest draft, and completed per-turn model/tool usage."""
 
@@ -53,3 +60,6 @@ class AgentState(MessagesState):
     # Approval and failure resumes omit these fields, keeping checkpointed totals.
     model_calls_this_turn: NotRequired[int]
     tool_calls_this_turn: NotRequired[int]
+
+    # Persist names only. The model node gets current instructions from its registry.
+    active_skills: NotRequired[Annotated[list[str], add_active_skills]]

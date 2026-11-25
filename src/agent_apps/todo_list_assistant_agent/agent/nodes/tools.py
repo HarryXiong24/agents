@@ -49,6 +49,9 @@ class ToolsNode:
         draft_calls = [
             call for call in request.tool_calls if call["name"] == "generate_todo_draft"
         ]
+        skill_loads = [
+            call for call in request.tool_calls if call["name"] == "load_skill"
+        ]
         used = state.get("tool_calls_this_turn", 0)
         requested = len(request.tool_calls)
         over_limit = used + requested > self._agent_config.max_tool_calls_per_turn
@@ -70,6 +73,18 @@ class ToolsNode:
             tool_messages = [
                 ToolMessage(
                     content="Call generate_todo_draft alone in its batch. No tools in this batch were executed.",
+                    tool_call_id=call["id"],
+                    name=call["name"],
+                    status="error",
+                )
+                for call in request.tool_calls
+            ]
+        elif skill_loads and len(request.tool_calls) != 1:
+            # Other calls see pre-batch runtime State. Load a skill in its own
+            # step so its instructions and reference access are active next.
+            tool_messages = [
+                ToolMessage(
+                    content="Call load_skill alone in its batch. No tools in this batch were executed.",
                     tool_call_id=call["id"],
                     name=call["name"],
                     status="error",
@@ -106,6 +121,14 @@ class ToolsNode:
             "tool_history": records,
             "tool_calls_this_turn": used if over_limit else used + requested,
         }
+        loaded = [
+            message.artifact["skill_name"]
+            for message in tool_messages
+            if message.name == "load_skill" and message.status == "success"
+        ]
+        if loaded:
+            # Return only accepted names; the State reducer merges and bounds them.
+            updates["active_skills"] = loaded
         if draft_calls:
             # A failed replacement request must not leave an older proposal active.
             updates["todo_draft"] = None

@@ -21,6 +21,8 @@ class AgentConfig:
     tool_history_limit: int = 10
     # Pause these tools before execution; the console supplies approval decisions.
     approval_tools: tuple[str, ...] = ("delete_todo",)
+    # Retain only the most recently loaded skill instructions per conversation.
+    max_active_skills: int = 2
 
 
 # One shared object; creating it does not read files or require model credentials.

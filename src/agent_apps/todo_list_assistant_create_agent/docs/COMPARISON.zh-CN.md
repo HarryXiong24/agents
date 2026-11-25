@@ -19,8 +19,8 @@
 | 持久化工具历史 | 工具节点更新 State | 历史 hooks 收集 ToolMessage 到自定义 State |
 | 工具顺序 | 顺序执行同批多个工具的 task | 每次模型响应只准入一个工具 |
 | 存储与终端 | 本地 SQLite、会话菜单 | 独立本地 SQLite，保留同类使用方式 |
-| 技能 | 不支持 | `SkillsMiddleware` 与 `load_skill` / `read_skill_file` |
-| MCP 工具 | 不支持 | `McpConnections` 包装远程工具；默认 HITL |
+| 技能 | ModelNode 上下文与工具节点激活更新 | `SkillsMiddleware` 与 `load_skill` / `read_skill_file` |
+| MCP 工具 | McpConnections 与单次调用审批包装 | `McpConnections` 包装远程工具；默认 HITL |
 
 `create_agent` 返回的仍然是编译后的 LangGraph 图，所以检查点、`thread_id`、
 `Command(resume=...)`、消息 reducer 与工具 runtime 注入仍然适用。
@@ -123,7 +123,8 @@ flowchart TD
 
 ## 技能：渐进式披露
 
-手动应用没有技能。这里用与草案相同的组件组合：构造时绑定的注册表、State 中的
+手动应用在 ModelNode 注入技能，由 ToolsNode 提交已接受名称 artifact。
+这里用与草案相同的组件组合：构造时绑定的注册表、State 中的
 名称列表、通过 `Command` 更新 State 的工具，以及把 State 转为模型上下文的
 `wrap_model_call`。
 

@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-这是基于 LangGraph 的终端待办助手，包含七个本地工具、四个图节点、滚动对话摘要、
+这是基于 LangGraph 的终端待办助手，包含七个基础本地工具、按需注册的技能工具和 MCP 工具、四个图节点、滚动对话摘要、
 SQLite 会话检查点、待办数据库，以及通过自定义 State reducer 保留的近期工具执行记录（默认十条）。
 每条待办仅使用 `project`（名称）、`minutes`（预计耗时）、`date`（安排日期）三个字段。
 
@@ -18,6 +18,8 @@ SQLite 会话检查点、待办数据库，以及通过自定义 State reducer �
 | `list_todos` | 查询待办，可按精确名称／日期筛选 |
 | `generate_todo_draft` | 为指定任务、日期和总时长预算请求一份未保存草案 |
 | `get_tool_history` | 读取当前会话保留的近期工具执行 |
+| `load_skill` / `read_skill_file` | 注册技能后加载操作手册、读取参考资料 |
+| `<server>_<tool>` | 调用已配置的 MCP 服务器，默认需要审批 |
 
 ## 待办字段与存储
 
@@ -71,7 +73,7 @@ python -m agent_apps.todo_list_assistant_agent
 
 模块入口也进入同一个菜单。会话名称作为内部 `thread_id`，区分大小写，首尾空白会被移除；新建时拒绝空名称和已有名称。检查点数据库中的会话在重启后仍可选择，启动时由菜单选择会话，不支持命令行指定会话。
 
-输入 `exit` 或 `quit`（不区分大小写），或按下键盘中断组合键结束。配置只读取 Agent 自己的 `.env`，不受启动目录影响，不使用外层仓库 `.env` 或 shell 中的同名变量。读取不会修改全局 `os.environ`，也不展开 `${...}` 引用。真实 `.env` 已被 Git 忽略，`.env.example` 是可提交的配置模板。
+输入 `exit` 或 `quit`（不区分大小写），或按下键盘中断组合键结束。模型配置只读取 Agent 自己的 `.env`，MCP 服务器单独配置在本应用的 `mcp.json`，不受启动目录影响，不使用外层仓库 `.env` 或 shell 中的同名变量。读取不会修改全局 `os.environ`，也不展开 `${...}` 引用。真实 `.env` 已被 Git 忽略，`.env.example` 是可提交的配置模板。
 
 终端使用 Python 标准库 `readline` 处理中文字符的退格和编辑，不自动记录输入历史。当前运行环境为 macOS；不需要额外安装终端输入依赖。
 
@@ -131,6 +133,114 @@ Assistant: That is 315 minutes, or 5.25 hours.
 `bind_tools()` 让模型知道工具的名称、参数和用途；模型返回的是调用请求，真正执行工具的是 `ToolNode`。工具结果以消息形式返回给模型，用于继续判断。
 
 模型通常可以根据对话选择工具，但不保证每次都遵循提示词。观察程序实际打印的工具提示，可以确认是否执行了工具；程序不会展示模型的内部推理。
+
+## 技能（Skills）
+
+技能遵循 Agent Skills 目录格式：`skills/` 下每个技能一个目录，
+其中 `SKILL.md` 以 YAML frontmatter 开头。
+
+```text
+skills/
+├── study-plan/
+│   ├── SKILL.md
+│   └── references/session-guide.md
+└── todo-cleanup/
+    └── SKILL.md
+```
+
+```markdown
+---
+name: study-plan            # 小写字母/数字/连字符，必须与目录名相同
+description: 做什么、何时使用（1–1024 个字符）。
+---
+
+# 给主模型的 Markdown 指令
+```
+
+技能采用渐进式披露：
+
+| 层级 | 时机 | 内容 | 机制 |
+|---|---|---|---|
+| 1. 目录 | 每次主模型调用 | 所有技能的名称与描述 | `ModelNode.model` |
+| 2. 指令 | `load_skill(name)` 之后 | `SKILL.md` 正文 | 名称写入 `active_skills`，后续调用注入正文 |
+| 3. 参考资料 | `read_skill_file(name, path)` | `references/*.md` 或 `*.txt` 文件 | 作为工具结果返回 |
+
+- 技能在启动时一次性加载。格式错误的技能（frontmatter、名称、大小、UTF-8，
+  或参考文件解析到目录外）会以 `Startup failed: ...` 停止启动，而不是被跳过。
+  修改文件后需重启生效。
+- State 只保存技能名称。指令放在 system message 中，不在 `messages` 内，
+  因此摘要不会删除它们；按会话保留，直到更新的加载使其超出 `max_active_skills`。
+- 代码强制 `read_skill_file` 只能读取已激活技能的预加载路径，调用时不访问磁盘。
+  脚本和其他资源不会被加载或执行。
+- `load_skill` 和 `read_skill_file` 都是普通工具，每个请求占用一次工具额度并写入历史，
+  整批完成后统一计数。`load_skill` 必须单独成批，代码会在任何副作用前拒绝混合批次；
+  后续步骤才能读取新激活技能的参考资料。
+- 技能是来自受信任、受版本控制文件的 prompt 引导，不能绕过审批、校验或配额。
+  没有 `skills/` 目录时，两个技能工具和技能提示段都不会注册。
+
+新增技能：创建 `skills/<name>/SKILL.md`，按需添加 `references/`，然后重启。
+只写入审阅过的指令：技能文本会进入 system prompt。
+
+例如：“帮我规划 2026-12-01 的 Python 学习，总共 120 分钟。”模型可能加载
+study-plan、读取指南，再按目标拆出小节名称并请求未保存草案。用户明确给出的名称保持不变。
+技能选择属于模型引导。`config/agent.py` 中的 `AgentConfig.max_active_skills` 默认是 2。
+
+## MCP 服务器
+
+复制示例配置，即可启用随应用提供、无副作用的番茄钟服务器。
+然后输入“把 70 分钟拆成番茄钟”，即可尝试 pomodoro_plan_pomodoros：
+
+```bash
+cp src/agent_apps/todo_list_assistant_agent/mcp.example.json src/agent_apps/todo_list_assistant_agent/mcp.json
+```
+
+```json
+{
+  "mcpServers": {
+    "pomodoro": {
+      "transport": "stdio",
+      "command": "python",
+      "args": ["-m", "agent_apps.todo_list_assistant_agent.mcp_servers.pomodoro"],
+      "require_approval": false
+    },
+    "remote": {
+      "transport": "streamable_http",
+      "url": "https://example.test/mcp",
+      "headers": {"Authorization": "Bearer ${MCP_TOKEN}"},
+      "tools": ["search"],
+      "timeout": 30
+    }
+  }
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `transport` | `stdio`（默认）或 `streamable_http` |
+| `command` / `args` / `env` / `cwd` | stdio 进程；字面量命令 `python` 表示运行本应用的解释器 |
+| `url` / `headers` | streamable HTTP 端点 |
+| `tools` | 可选的服务器工具名白名单；省略表示全部 |
+| `require_approval` | 默认 `true`：`approve_tool_call` 在执行该服务器的每个工具前暂停 |
+| `timeout` | 握手与每次调用的秒数（默认 30，最大 600） |
+
+- `${NAME}` 占位符只从本应用 `.env` 解析；缺失时停止启动，不使用 shell 变量。
+  从 `.env` 取出的值不再二次展开，其中作为字面量的 `$` 与 `${NAME}` 保持原样。
+  `mcp.json` 由 Git 忽略。
+- stdio 服务器只收到 MCP SDK 的安全默认环境变量（如 `PATH`、`HOME`）和自己的
+  `env`，不会继承完整 shell 环境。
+- 服务器在会话菜单之后连接一次，保持打开直到退出，启动时打印 `MCP tools: ...`。
+  无法启动、无法在 `timeout` 内列出工具或不满足白名单的服务器会停止启动。
+- 退出时先给会话 10 秒正常关闭。清理仍未完成则取消并等待所属任务收尾，
+  其余任务也会取消并等待，之后才关闭事件循环。取消后的清理可能需要额外时间，
+  所以 10 秒不是整个关闭过程的硬截止时间。
+- 每个工具以 `<server>_<tool>` 暴露，描述以 `[MCP server: name]` 开头。
+  名称必须符合供应商规则且在所有工具中唯一，否则停止启动。
+- MCP 工具复用顺序 `@task` 执行路径。整批配额检查先于审批和执行，整批完成后统一计数；
+  批准后的执行记录耗时，拒绝的请求仍有配对结果与历史。
+- 服务器报告的错误（`isError`）变成模型可读的错误 ToolMessage。超时和传输/会话
+  故障抛出 `McpServerError`，终端报告后结束本轮。没有重连或重试循环。
+- 结果被展平为文本；非文本内容只标注类型，不转发。提示词要求模型把 MCP 结果
+  当作数据而非指令——这是引导，审批与配额才由代码强制。
 
 ## 对话历史持久化
 
@@ -312,7 +422,7 @@ Context: Earlier conversation summarized; recent turns kept.
 读取的是本批工具执行前的状态；要包含另一工具的新执行，需要在后续步骤查询。
 没有新增独立的终端命令或自动展示面板。
 
-图为四个节点、七个工具。工具历史使用已有检查点数据库，没有独立的表；
+图为四个节点、七个基础工具，以及按需注册的技能／MCP 工具。工具历史使用已有检查点数据库，没有独立的表；
 保留条数由 `AgentConfig.tool_history_limit` 配置，默认十条；
 `tools()` 包装 `ToolNode` 来生成记录。图的 `recursion_limit` 默认是 `20`，
 同时受前述已完成调用次数限制。工具历史由节点生成；下面的观察中间件负责向终端输出执行信息。
@@ -379,7 +489,7 @@ Approve this call? [y/n/exit]:
 保存完成后的 `ToolMessage`。恢复审批会重跑工具节点，但已完成的任务直接返回保存的结果。
 例如先保存待办、后暂停在删除审批时，重开会话批准删除，不会重新执行前面的保存。
 
-任务与中间件函数不是额外图节点，图包含摘要、模型、工具、草案四个节点和七个工具。
+任务与中间件函数不是额外图节点，图包含摘要、模型、工具、草案四个节点、七个基础工具，以及按需注册的技能／MCP 工具。
 每个工具读取本批开始前的 State；要在查询中包含本批记录，需要在后续模型步骤查询。
 整批完成后，`tools()` 才返回消息与新增历史记录。暂停期间，前面工具可能已提交业务修改，
 但本批消息／历史增量还没有返回。
@@ -450,7 +560,8 @@ todo_list_assistant_agent/
 │   ├── __init__.py                # 只导出公开接口
 │   ├── agent.py                   # Agent 摘要与执行参数
 │   ├── model.py                   # 模型配置、默认值与校验
-│   └── app.py                     # 路径、.env 读取与 AppConfig 组装
+│   ├── app.py                     # 路径、.env 读取与 AppConfig 组装
+│   └── mcp.py                     # MCP 传输与审批配置
 ├── agent/
 │   ├── __init__.py
 │   ├── graph.py                  # 固定依赖、节点对象与流程连线
@@ -463,11 +574,14 @@ todo_list_assistant_agent/
 │   │   ├── calculator.py         # 数值计算
 │   │   ├── todos.py              # 保存、删除、查询待办
 │   │   ├── history.py            # 通过 runtime 读取工具历史
-│   │   └── draft.py              # 校验交给草案节点的请求
+│   │   ├── draft.py              # 校验交给草案节点的请求
+│   │   └── skills.py             # 技能激活请求与参考资料查询
 │   ├── middleware/               # 单次调用包装与错误格式化
 │   │   ├── __init__.py           # 公开导出与包装函数组合
 │   │   ├── approval.py           # 使用 interrupt 进行人工审批
 │   │   └── tool_execution.py     # 执行观察与已知输入错误处理
+│   ├── mcp.py                    # MCP 会话与同步工具包装
+│   ├── skills.py                 # 受信任 SKILL.md／参考资料加载
 │   ├── model.py                  # 创建聊天模型
 │   ├── prompts.py                # 读取模板与动态组装提示词
 │   ├── memory.py                 # 待办校验与 SQLite 增删改查
@@ -482,7 +596,11 @@ todo_list_assistant_agent/
 │       ├── system_prompt.md
 │       ├── todo_list_prompt.md
 │       ├── summary_prompt.md
-│       └── draft_prompt.md
+│       ├── draft_prompt.md
+│       └── skills_prompt.md
+├── skills/                       # study-plan、todo-cleanup 操作手册
+├── mcp_servers/                  # 无副作用的番茄钟示例服务器
+├── mcp.example.json              # 被忽略的 mcp.json 的可共享模板
 ├── data/                         # 个人 SQLite 文件，不提交 Git
 ├── docs/                         # 中英文学习文档
 └── tests/                        # 使用临时存储的离线测试
@@ -554,9 +672,10 @@ result = graph.invoke(
 
 `main.py` 打开 Saver，通过 `threads = checkpoints.list_threads(checkpointer)` 获取普通列表，再交给 `console.py` 的 `select_thread(threads)`。菜单不访问数据库；`agent/checkpoints.py` 集中管理 `CHECKPOINTS_FILE` 和会话查询 SQL，`console.py` 管理 `select_thread()` 和 `chat()`。入口直接进入会话列表，不解析命令行参数。
 
-`config/` 按三类职责拆分：`agent.py` 定义 `AgentConfig`，统一管理摘要参数、
+`config/` 按三个核心职责加 MCP schema 模块拆分：`agent.py` 定义 `AgentConfig`，统一管理摘要参数、
 图执行步数、每轮调用上限、工具历史条数与审批工具名单；`model.py` 定义和解析 `ModelConfig`；`app.py` 管理路径、
-`AppConfig`、唯一的 `read_env()` 和 `load_config()` 组装逻辑。`.env` 只提供模型配置，
+`AppConfig`、唯一的 `read_env()` 和 `load_config()` 组装逻辑。`config/mcp.py` 解析本地
+MCP 服务器配置；`.env` 提供模型配置及明确的 MCP 占位符值，
 `config/agent.py` 只创建一份共享的 `AGENT_CONFIG = AgentConfig()`，
 `load_config()` 将同一个对象呈现为 `settings.agent`；图和 reducer 直接读取这份配置。
 State 字段全部保留在 `AgentState` 中。
@@ -565,7 +684,10 @@ State 字段全部保留在 `AgentState` 中。
 用户选择会话后，`main.py` 调用一次 `load_config()`，将 `settings.model` 传给
 `create_model()`，`build_graph()` 和 State reducer 使用 `config/agent.py` 中的共享配置。`agent/model.py` 只创建客户端，
 不读取 `.env`，不设置配置默认值。导入配置包不会读取文件，查看菜单和退出仍不需要 API Key。
-测试或其他调用方可用 `load_config(env_file)` 显式选择配置文件，不改变应用的默认文件位置。
+测试或其他调用方可用 `load_config(env_file, mcp_file)` 显式选择配置文件，不改变应用的默认文件位置。
+
+技能激活名称也保存在 State 中，按会话恢复。指令在每次模型调用时从启动注册表重新注入；
+重启后删除的技能不再注入。MCP 连接、模型与技能注册表属于固定资源，不写入检查点。
 
 ## 两种记忆怎样配合
 
@@ -594,4 +716,8 @@ token 阈值、完整轮次保留和 `RemoveMessage`。结构图、阅读顺序�
 uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests
 ```
 
-测试使用模拟模型、临时配置文件和临时数据库，不需要真实密钥或网络。覆盖依赖一次性绑定、共享节点对象下的会话隔离、依赖不写入检查点、配置隔离、触发阈值、滚动摘要、工具配对、摘要失败恢复、跨进程恢复、待办工具中断恢复、工具记录数量限制、只读历史查询、runtime 注入、摘要后的工具记录保留、待办增删改查、中文输入和存储，工具观察、批准／拒绝、终端退出后续审、多次顺序审批，跨进程复用已完成任务、请求／schema 校验、草案业务检查、单次回复、重启恢复、明确保存、JSON mode 请求、普通查询、自然回复持久化、模型／工具上限、整批拒绝、新轮次重置、审批／失败恢复时的用量保留、异常分类、SDK HTTP 重试与存储失败后复用已完成写入。
+测试使用模拟模型、临时配置文件和临时数据库，不需要真实密钥或外部网络请求。MCP 测试启动临时本地 stdio 服务器，HTTP 会话创建使用模拟。覆盖依赖一次性绑定、共享节点对象下的会话隔离、依赖不写入检查点、配置隔离、触发阈值、滚动摘要、工具配对、摘要失败恢复、跨进程恢复、待办工具中断恢复、工具记录数量限制、只读历史查询、runtime 注入、摘要后的工具记录保留、待办增删改查、中文输入和存储，工具观察、批准／拒绝、终端退出后续审、多次顺序审批，跨进程复用已完成任务、请求／schema 校验、草案业务检查、单次回复、重启恢复、明确保存、JSON mode 请求、普通查询、自然回复持久化、模型／工具上限、整批拒绝、新轮次重置、审批／失败恢复时的用量保留、异常分类、SDK HTTP 重试与存储失败后复用已完成写入。
+
+MCP／技能新增检查覆盖服务器配置、环境变量字面值、关闭清理、默认审批与关闭审批、
+远程结果／错误、工具命名、重启部分审批批次而不重复已完成远程调用、技能发现／加载、
+有界激活、活跃技能参考资料读取、混合加载批次拒绝、配额，以及摘要压缩与重启后保留激活。

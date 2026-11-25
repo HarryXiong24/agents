@@ -2,8 +2,8 @@
 
 English | [简体中文](README.zh-CN.md)
 
-A console-based Todo List Assistant Agent built with LangGraph. It combines seven local
-tools, four graph nodes, rolling conversation summaries, SQLite checkpoints,
+A console-based Todo List Assistant Agent built with LangGraph. It combines seven base
+local tools, optional skill tools and MCP tools, four graph nodes, rolling conversation summaries, SQLite checkpoints,
 SQLite todo storage, and a custom State reducer retaining recent tool
 call results, including rejected requests. Each todo has exactly three fields: `project` (name), `minutes`
 (estimated duration), and `date` (scheduled date).
@@ -22,6 +22,8 @@ explicitly requested. This README describes current usage and design; the
 | `list_todos` | Query saved todos, optionally filtered by exact name/date |
 | `generate_todo_draft` | Request an unsaved arrangement for named tasks within a date/time budget |
 | `get_tool_history` | Read the current conversation's retained recent tool executions |
+| `load_skill` / `read_skill_file` | Load a shipped playbook and read its references when skills are registered |
+| `<server>_<tool>` | Call configured MCP servers, with approval on by default |
 
 ## Todo fields and storage
 
@@ -75,7 +77,7 @@ python -m agent_apps.todo_list_assistant_agent
 
 The module entry point opens the same menu. Names serve as internal `thread_id` values and are case-sensitive. Surrounding whitespace is removed; empty or existing names are rejected when creating a conversation. Conversations saved in the checkpoint database remain selectable after restart. There is no automatic default selection or command-line conversation option.
 
-Type `exit` or `quit`, or press Ctrl+C, to stop. Exit commands are case-insensitive. Configuration is read only from the agent-local `.env`, independently of the working directory. The outer repository `.env` and same-named shell variables are not used. Values are read without modifying `os.environ` or expanding `${...}` references. The private `.env` is ignored by Git; `.env.example` is the shareable template.
+Type `exit` or `quit`, or press Ctrl+C, to stop. Exit commands are case-insensitive. Model configuration is read only from the agent-local `.env`, independently of the working directory. MCP servers are configured separately in the local `mcp.json`. The outer repository `.env` and same-named shell variables are not used. Values are read without modifying `os.environ` or expanding `${...}` references. The private `.env` is ignored by Git; `.env.example` is the shareable template.
 
 The console uses Python's standard `readline` module for Unicode editing and backspace without automatically recording input history. The current environment is macOS; no extra terminal package is required.
 
@@ -133,6 +135,126 @@ User input -> Summary check -> Model node
 `bind_tools()` exposes names, parameters, and descriptions. The model returns a request; `ToolNode` actually executes it and sends tool-result messages back to the model.
 
 Models do not always follow instructions perfectly. Check the printed tool messages to see what actually executed. The program does not display the model's private reasoning.
+
+## Skills
+
+Skills follow the Agent Skills layout: one directory per skill under `skills/`,
+each with a `SKILL.md` that starts with YAML frontmatter.
+
+```text
+skills/
+├── study-plan/
+│   ├── SKILL.md
+│   └── references/session-guide.md
+└── todo-cleanup/
+    └── SKILL.md
+```
+
+```markdown
+---
+name: study-plan            # lowercase/digits/hyphens; must equal the directory
+description: What it does and when to use it (1–1024 characters).
+---
+
+# Markdown instructions for the main model
+```
+
+Skills are disclosed progressively:
+
+| Level | When | Content | Mechanism |
+|---|---|---|---|
+| 1. Catalog | Every main-model call | Name and description of every skill | `ModelNode.model` |
+| 2. Instructions | After `load_skill(name)` | The `SKILL.md` body | Name stored in `active_skills`, body injected on later calls |
+| 3. References | `read_skill_file(name, path)` | A `references/*.md` or `*.txt` file | Returned as a tool result |
+
+- Skills are loaded once at startup. A malformed skill (frontmatter, name, size,
+  UTF-8, or a reference that resolves outside its directory) stops startup with
+  `Startup failed: ...` rather than being skipped. Edit files and restart to apply.
+- State stores only skill names. Instructions live in the system message, not in
+  `messages`, so summarization does not remove them. They persist per conversation
+  until newer loads push them past `max_active_skills`.
+- `read_skill_file` is enforced to work only for an active skill and a preloaded
+  path; it never touches the disk at call time. Scripts and assets are not loaded
+  or executed.
+- `load_skill` and `read_skill_file` are ordinary tools: each request consumes one
+  tool slot and appears in history. Usage commits when the whole batch completes.
+  `load_skill` must be alone in its batch, enforced before effects; subsequent
+  steps can read references from the newly active skill.
+- Skills are prompt guidance from trusted, version-controlled files. They cannot
+  bypass approval, validation or quotas. Without a `skills/` directory, neither
+  skill tool nor the Skills prompt section is registered.
+
+To add a skill, create `skills/<name>/SKILL.md`, optionally add `references/`,
+then restart. Write only reviewed instructions: skill text enters the system prompt.
+
+Example: “Plan Python study on 2026-12-01 within 120 minutes.” The model may
+load `study-plan`, read its guide and request an unsaved draft with session names
+derived from the goal. Explicit task names stay unchanged. Skill selection is
+model guidance. Set `AgentConfig.max_active_skills` in `config/agent.py` (default 2).
+
+## MCP servers
+
+Copy the example to enable the bundled, side-effect-free pomodoro server.
+Then ask “Split 70 minutes into pomodoros” to use `pomodoro_plan_pomodoros`:
+
+```bash
+cp src/agent_apps/todo_list_assistant_agent/mcp.example.json src/agent_apps/todo_list_assistant_agent/mcp.json
+```
+
+```json
+{
+  "mcpServers": {
+    "pomodoro": {
+      "transport": "stdio",
+      "command": "python",
+      "args": ["-m", "agent_apps.todo_list_assistant_agent.mcp_servers.pomodoro"],
+      "require_approval": false
+    },
+    "remote": {
+      "transport": "streamable_http",
+      "url": "https://example.test/mcp",
+      "headers": {"Authorization": "Bearer ${MCP_TOKEN}"},
+      "tools": ["search"],
+      "timeout": 30
+    }
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `transport` | `stdio` (default) or `streamable_http` |
+| `command` / `args` / `env` / `cwd` | stdio process; the literal command `python` is the interpreter running this app |
+| `url` / `headers` | streamable HTTP endpoint |
+| `tools` | Optional allowlist of the server's tool names; omitted means all |
+| `require_approval` | Default `true`: `approve_tool_call` pauses every tool of this server |
+| `timeout` | Seconds for the handshake and for each call (default 30, max 600) |
+
+- `${NAME}` placeholders resolve only from this application's `.env`; a missing
+  value stops startup. Values taken from `.env` are not expanded a second time,
+  so literal `$` and `${NAME}` inside them stay unchanged. Shell variables are
+  not used for substitution. `mcp.json` is Git-ignored.
+- stdio servers receive the MCP SDK's safe default environment (such as `PATH`
+  and `HOME`) plus their own `env`, not the full shell environment.
+- Servers connect once after the conversation menu and stay open until exit.
+  Startup prints `MCP tools: ...`. A server that cannot start, list its tools
+  within `timeout`, or satisfy its allowlist stops startup.
+- On exit, sessions receive 10 seconds to close normally. If cleanup is still
+  pending, the owning task is cancelled and awaited; remaining tasks are also
+  cancelled and awaited before the event loop is closed. Cancellation cleanup
+  may take additional time, so 10 seconds is not a hard total shutdown deadline.
+- Each tool is exposed as `<server>_<tool>`, described as `[MCP server: name]`.
+  Names must be provider-safe and unique among all tools, or startup stops.
+- MCP tools use the existing sequential `@task` path. Whole-batch quotas are
+  checked before any approval or execution, and handled requests are counted once
+  when the batch completes. Approved executions receive timing logs; declined
+  requests still receive paired results and history records.
+- A server-reported error (`isError`) becomes an error ToolMessage the model can
+  read. Timeouts and transport/session failures raise `McpServerError`; the
+  console reports it and ends the turn. There is no reconnection or retry loop.
+- Results are flattened to text; non-text content is named but not forwarded.
+  The prompt tells the model to treat MCP results as data, not instructions;
+  that is guidance, while approval and quotas are enforced by code.
 
 ## Persistent conversations
 
@@ -346,7 +468,7 @@ They are not automatically added to every model prompt. The read-only `get_tool_
 
 Ask "Which tools ran in this conversation? Show the arguments, results, and timestamps." The assistant should call `get_tool_history` and present retained recent executions (up to ten by default). An empty list means there are no records to show. The lookup takes no model-supplied arguments and reads the state before its tool batch; to include another tool's new execution, query in a subsequent step. There is no separate console command or automatic history panel.
 
-The graph has four nodes and seven tools. Tool history uses the existing
+The graph has four nodes and seven base tools, plus any registered skill/MCP tools. Tool history uses the existing
 checkpoint database and has no separate table; retention is configured by
 `AgentConfig.tool_history_limit`.
 `tools()` wraps `ToolNode` to generate the records. The graph uses
@@ -429,7 +551,7 @@ results. For example, a save before a pending deletion does not execute again
 when you reopen the conversation and approve the deletion.
 
 The task and middleware functions are not additional graph nodes: the graph still
-has summary, model, tools, and draft nodes, and seven tools. Each tool sees the original
+has summary, model, tools, and draft nodes, and seven base tools, plus any registered skill/MCP tools. Each tool sees the original
 pre-batch State, so query history in a later model step to include this batch.
 `tools()` returns messages and new history records after the whole batch
 completes. While paused, some earlier tools may already have committed changes,
@@ -504,7 +626,8 @@ todo_list_assistant_agent/
 │   ├── __init__.py                # Public exports only
 │   ├── agent.py                   # Agent summary and execution settings
 │   ├── model.py                   # Model settings, defaults, and validation
-│   └── app.py                     # Paths, .env reading, and AppConfig assembly
+│   ├── app.py                     # Paths, .env reading, and AppConfig assembly
+│   └── mcp.py                     # MCP transport and approval configuration
 ├── agent/
 │   ├── __init__.py
 │   ├── graph.py                  # Fixed dependencies, node objects, and edges
@@ -517,11 +640,14 @@ todo_list_assistant_agent/
 │   │   ├── calculator.py         # Arithmetic
 │   │   ├── todos.py              # Save, delete, and list todos
 │   │   ├── history.py            # Runtime-injected tool history lookup
-│   │   └── draft.py              # Validate requests for the draft node
+│   │   ├── draft.py              # Validate requests for the draft node
+│   │   └── skills.py             # Skill activation requests and reference lookup
 │   ├── middleware/               # Per-call wrappers and error formatting
 │   │   ├── __init__.py           # Public exports and wrapper composition
 │   │   ├── approval.py           # Human approval via interrupt
 │   │   └── tool_execution.py     # Observation and known-input error handling
+│   ├── mcp.py                    # MCP sessions and synchronous tool wrappers
+│   ├── skills.py                 # Trusted SKILL.md/reference loader
 │   ├── model.py                  # Chat model creation
 │   ├── prompts.py                # Template loading and dynamic prompt formatting
 │   ├── memory.py                 # Todo validation and SQLite CRUD
@@ -536,7 +662,11 @@ todo_list_assistant_agent/
 │       ├── system_prompt.md
 │       ├── todo_list_prompt.md
 │       ├── summary_prompt.md
-│       └── draft_prompt.md
+│       ├── draft_prompt.md
+│       └── skills_prompt.md
+├── skills/                       # Shipped study-plan and todo-cleanup playbooks
+├── mcp_servers/                  # Bundled side-effect-free pomodoro server
+├── mcp.example.json              # Shareable template for ignored mcp.json
 ├── data/                         # Personal SQLite files; ignored by Git
 ├── docs/                         # Bilingual learning guides
 └── tests/                        # Offline tests with temporary storage
@@ -616,11 +746,12 @@ Filenames use lowercase and Python constants use uppercase; their casing does no
 
 `main.py` opens the saver, gets `threads = checkpoints.list_threads(checkpointer)`, and passes that ordinary list to `select_thread(threads)` in `console.py`. The menu does not access the database. `agent/checkpoints.py` owns `CHECKPOINTS_FILE` and the SQL used to list saved conversations; `console.py` owns `select_thread()` and `chat()`. Startup enters the conversation menu directly, without command-line argument parsing.
 
-`config/` has three responsibility modules. `agent.py` defines `AgentConfig`:
+`config/` has three core responsibility modules and an MCP schema module. `agent.py` defines `AgentConfig`:
 summary settings, graph execution steps, per-turn call limits, tool history retention, and approval tools. `model.py`
 defines and parses `ModelConfig`. `app.py` owns paths, `AppConfig`, the single
 `read_env()` function, and `load_config()` assembly. Only model settings are read
-from `.env`; `config/agent.py` creates one shared `AGENT_CONFIG = AgentConfig()` object.
+from `.env`, which also supplies explicit MCP placeholders. `config/mcp.py` parses
+server configuration from local `mcp.json`; `config/agent.py` creates one shared `AGENT_CONFIG = AgentConfig()` object.
 `load_config()` exposes that same object as `settings.agent`; the graph and reducer
 read it directly. All State fields stay together in `AgentState`.
 `config/__init__.py` only re-exports public names. There is no separate Agent
@@ -632,8 +763,13 @@ the shared `config/agent.py` object.
 `agent/model.py` only creates the client from supplied settings; it never reads
 `.env` or supplies configuration defaults. Importing the configuration package
 performs no file reads. Browsing the menu and exiting still require no API key.
-Tests or other callers can pass an explicit path with `load_config(env_file)`
+Tests or other callers can pass explicit paths with `load_config(env_file, mcp_file)`
 without changing the application's default file location.
+
+Skill activation names also live in State and are restored by thread ID.
+Their instructions are re-injected from the startup registry on every model call;
+removing a skill stops its text being injected after restart. MCP connections and
+model/skill registry objects are fixed resources and never enter checkpoints.
 
 ## Two kinds of memory
 
@@ -664,4 +800,10 @@ From the repository root:
 uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests
 ```
 
-Tests use simulated models, temporary configuration files, and temporary databases without real API keys or network. They cover one-time dependency binding, conversation isolation across shared node objects, dependencies excluded from checkpoints, configuration isolation, threshold boundaries, rolling summaries, tool-pair preservation, failed summary recovery, cross-process restoration, pending todo tool recovery, bounded tool history, read-only history queries, runtime injection, summary preservation of tool records, todo CRUD, Unicode input and storage, per-tool observation, approval/rejection, terminal exit/restart, sequential approvals, cross-process reuse of completed tasks, request/schema validation, draft business checks, single-reply presentation, restart recovery, explicit saving, JSON-mode requests, ordinary queries, checkpointed natural replies at END, model/tool limits, whole-batch rejection, new-turn resets, usage preservation across approval/failure resumes, error classification, SDK HTTP retries, and completed-write reuse after storage failure.
+Tests use simulated models, temporary configuration files, and temporary databases without real API keys or external network calls. MCP tests start temporary local stdio servers; HTTP session creation is mocked. They cover one-time dependency binding, conversation isolation across shared node objects, dependencies excluded from checkpoints, configuration isolation, threshold boundaries, rolling summaries, tool-pair preservation, failed summary recovery, cross-process restoration, pending todo tool recovery, bounded tool history, read-only history queries, runtime injection, summary preservation of tool records, todo CRUD, Unicode input and storage, per-tool observation, approval/rejection, terminal exit/restart, sequential approvals, cross-process reuse of completed tasks, request/schema validation, draft business checks, single-reply presentation, restart recovery, explicit saving, JSON-mode requests, ordinary queries, checkpointed natural replies at END, model/tool limits, whole-batch rejection, new-turn resets, usage preservation across approval/failure resumes, error classification, SDK HTTP retries, and completed-write reuse after storage failure.
+
+MCP/skill checks additionally cover server configuration, literal environment values,
+shutdown cleanup, default approval and opt-out, remote results/errors, tool names,
+restarting a partially approved MCP batch without repeating completed remote calls,
+skill discovery/loading, bounded activation, active reference access, mixed-load
+batch rejection, quotas, and activation surviving summary compression and restart.

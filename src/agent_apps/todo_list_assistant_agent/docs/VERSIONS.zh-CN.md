@@ -14,22 +14,24 @@
 | V6 | 自定义工具历史 reducer、执行记录、历史查询、`agent/` 包与配置统一入口 | State 增量更新、runtime 注入、持久化、自定义状态向模型开放 |
 | V7 | 工具观察、人工审批、中间件组合与单次调用检查点恢复 | 包装函数、`interrupt`、`Command(resume=...)`、终端决定与持久化任务 |
 | V8 | 结构化待办草案、业务检查、候选持久化、普通列表查询与自然回复 | 模型 JSON 输出与本地校验、用户约束、草案／已保存数据分离、固定节点依赖 |
-| V9（当前） | 在原节点内增加基础 ReAct 调用上限、异常分类、仅 SDK 模型重试与正常结束 | State 计数、协议配对、输入与运行故障区分、有限 SDK 重试与已完成次数语义 |
+| V9 | 在原节点内增加基础 ReAct 调用上限、异常分类、仅 SDK 模型重试与正常结束 | State 计数、协议配对、输入与运行故障区分、有限 SDK 重试与已完成次数语义 |
+| V10 | MCP 服务器、本地配置、同步包装与原有审批／任务恢复 | 协议与工具、资源生命周期、外部错误与持久化单次结果 |
+| V11（当前） | 本地技能、渐进式披露、活跃名称与参考资料查询 | 固定注册表与 State、标记 artifact、reducer 与模型上下文 |
 
 当前代码、提示词、工具说明和终端文案默认使用英文，退出命令为 `exit` 或 `quit`。本文保留中文学习说明，以下旧版本内容用于回顾功能演进。
 
 这份文档专门记录每个版本学什么、增加什么、怎样验证。后续增加功能时，继续在这里追加对应版本。
 
-当前运行代码是第九版，提供基础调用限制、异常分类、SDK 重试与结构化待办草案，普通回复保持自然文本。
+当前运行代码是第十一版，包含 MCP 外部工具和本地 Skills，同时保留摘要、待办草案、调用限制与检查点会话，普通回复保持自然文本。
 旧版本用于回顾学习历史，并不是互相独立的运行目录。
 
-当前 Agent 执行与持久化模块位于 `agent/`，启动、终端和共享配置保留在应用根目录。旧章节保留历史路径；对照当前源码时，以最新 README 布局及第九版的 `agent/nodes/` 模块为准。
+当前 Agent 执行与持久化模块位于 `agent/`，启动、终端和共享配置保留在应用根目录。旧章节保留历史路径；对照当前源码时，以最新 README 布局及`agent/nodes/`、`agent/tools/` 与 MCP／技能模块为准。
 
 图中既包含程序组件，也包含数据流。第一至第四版有“模型节点”和“工具节点”，第五版新增“摘要节点”；第六版沿用这三个节点，在工具步骤内增加自定义状态处理。第七版在 `ToolNode` 内增加包装函数，不增加节点；第八版新增第四个 draft 节点，生成并校验结构化草案；第九版沿用四个节点，在内部增加调用次数检查。存储辅助函数和终端循环仍不是图节点。
 
-### 第九版当前源码布局
+### 当前源码布局
 
-工具与工具调用包装函数已改为包。这属于当前版本内的目录整理，节点／任务名称、
+工具与工具调用包装函数已改为包。包结构在第九版内整理，节点／任务名称、
 工具契约、审批顺序、检查点和待办数据路径均保持不变。旧章节保留历史文件名，
 对照当前代码学习时使用下面的映射：
 
@@ -1460,18 +1462,198 @@ uv run pytest -q src/agent_apps/todo_list_assistant_agent/tests -W error
 独立 review 发现时长在存储检查前被 Pydantic 隐式转换，例如 True 变成 1。
 已改用 StrictInt，并补四种经过 ToolNode 的回归，确认 True、False、"30"、30.0 均不会写入。
 
-## 已确认的后续学习计划（尚未实现）
+## 第十版：把 MCP 工具接入现有图
 
-用户于 2026-11-06 确认以下学习顺序。这里只记录未来主题，不表示功能已经实现；
-原第十版方案中的基础异常分类与 SDK 重试已按用户要求合入第九版，不新建第十版。
-原第十一版的流式主题仍未实现，是否调整编号或扩展重试范围，等待用户后续决定。
+### 学习目标
 
-| 计划版本 | 主要主题 | 预期学习范围 |
-|---|---|---|
-| V11 | 流式交互 | 逐步显示模型回复、工具进度和审批事件，区分事件流、最终 State 与已保存检查点 |
+把外部进程或 HTTP MCP 服务器提供的工具接入同一个 ReAct 循环，区分传输／会话资源、
+模型可见的工具 schema、单次调用审批和有检查点的任务结果。
 
-继续保持每版只增加一个主要积木，两种语言的说明、结构图、示例与验证记录同步。
-更后面的主题等待用户选择，不纳入本次已确认路线。
+### 范围与边界
+
+图仍然只有 `summarize`、`model`、`tools`、`draft` 四个节点；MCP 增加工具，不增加节点。
+待办／检查点的 SQLite 路径及历史数据保持不变。没有 `mcp.json` 时沿用本地工具行为，
+不迁移旁边 create_agent 应用的数据。
+
+支持 stdio 与 streamable HTTP，可按服务器设置工具白名单，默认需要审批。
+番茄钟示例只读，因此示例配置显式关闭审批。外部输出作为数据处理属于 prompt 引导，
+审批、命名／白名单与配额由代码执行。
+
+### 组件结构图
+
+```mermaid
+flowchart TD
+    J[本应用 mcp.json 与 .env] --> C[config/mcp.py]
+    C --> L[main.py 打开 McpConnections]
+    L --> P[私有循环与所属任务]
+    P --> S[MCP 会话]
+    S --> W[同步 McpTool 包装]
+    B[本地工具注册表] --> G[graph.py 共享工具列表]
+    W --> G
+    G --> M[原模型节点]
+    G --> T[原工具节点与 execute_tool 任务]
+    M -->|工具请求| T
+    T --> A[审批后观察并执行]
+    A -->|MCP 调用| P
+    T --> H[历史与已完成批次用量]
+    T -. 完成的任务结果 .-> Q[SQLite 检查点]
+```
+
+图中的方框也包含资源和辅助模块，不全是图节点。
+
+### 调整组件与阅读顺序
+
+| 模块 | 职责 |
+|---|---|
+| `config/mcp.py`、`config/app.py` | 校验服务器配置，只从本地 .env 展开一次 `${NAME}` |
+| `mcp.example.json`、`mcp_servers/pomodoro.py` | 可共享的可选配置与本地示例服务器 |
+| `agent/mcp.py` | 资源生命周期、分页发现、工具名前缀、文本结果与同步包装 |
+| `main.py` | 菜单之后打开资源，并在整个聊天期间保持打开 |
+| `agent/graph.py` | 模型绑定与 ToolNode 使用同一份合并工具列表 |
+| `agent/middleware/approval.py` | 同时根据 MCP 服务器元数据和本地配置决定审批 |
+| `console.py` | 解释传输故障，保留检查点供以后恢复 |
+
+建议顺序：配置 → McpConnections → 构图 → 审批包装 → 原 `nodes/tools.py` 任务 → 终端。
+`build_graph(model, saver, mcp_tools=tools)` 通过执行器闭包绑定连接后的工具，
+不把活动资源作为序列化任务参数。
+
+### 会话生命周期与异常
+
+McpConnections 管理后台事件循环，图仍同步 `invoke`。同一个所属任务负责进入／退出
+所有会话，保持 anyio scope 所有权一致。包装工具把 ClientSession.call_tool 提交到循环。
+stdio 直接使用 MCP SDK，保留本地配置已经解析的环境值，避免 shell 二次展开；
+HTTP 会话使用适配器。
+
+启动和每次调用有配置的超时。关闭时先给所属任务 10 秒正常清理，超时则取消并等待
+收尾，再取消并等待其余任务后关闭循环；取消清理可能需要额外时间，不直接丢弃任务。
+服务器 `isError` 转为错误 ToolMessage；传输／超时抛出 McpServerError，不增加重连或
+工具重试循环。远程操作超时时，服务器可能已经产生副作用。
+
+整批配额检查先于任何审批／执行。已有 `@task` 保存每次结果：后面的审批尚未完成时
+退出，重启使用新连接完成未完成调用，先前完成的远程结果复用缓存。
+用量／历史在整批完成后提交一次。若进程在副作用产生后、结果保存前失败，
+仍不保证远程副作用 exactly-once。
+
+### 练习
+
+1. 将本应用 mcp.example.json 复制为 mcp.json，要求把 70 分钟拆成番茄钟，
+   在暴露的工具里找到 pomodoro_plan_pomodoros。
+2. 打开 require_approval，拒绝调用，确认没有真实执行日志。
+3. 用假模型请求同批两个远程工具，批准第一个，在第二个审批时退出；重启观察任务复用。
+4. 配置不存在的白名单工具或错误命令，观察启动失败；用隔离临时服务器体验超时测试。
+
+### 验证方式
+
+```bash
+.venv/bin/python -m pytest -q src/agent_apps/todo_list_assistant_agent/tests/test_mcp.py -W error
+```
+
+测试覆盖真实本地 stdio 发现与调用、命名／白名单、默认审批与显式关闭、服务器错误、
+调用／启动超时、关闭清理、环境变量字面值、保留参数名、模拟 HTTP 会话创建、
+终端分类与重启部分批次复用。离线测试不代表真实 Groq 或远程 HTTP MCP 已经联调。
+
+## 第十一版：Skills 与渐进式披露
+
+### 学习目标
+
+通过操作手册表达重复工作流，不增加另一个 Agent 或图节点。区分元数据发现、指令激活、
+参考资料查询、持久化名称和模型上下文，并对新 State 字段应用自定义 reducer。
+
+### 范围与边界
+
+启动时一次加载受信任、受版本控制的 skills/<name>/SKILL.md。随应用提供 study-plan
+和只读 todo-cleanup，两者调用现有工具。加载器读取 YAML 元数据、Markdown 指令及
+references/ 下有大小限制的 UTF-8 文本，不执行脚本或资产。没有技能目录就不注册技能
+工具和目录提示；错误技能停止启动。
+
+注册表是 ModelNode 与绑定后技能工具的固定依赖，不把对象保存到 State。
+active_skills 只保存名称，与消息压缩独立。技能文本不授权写操作，也不绕过校验、
+人工审批或每轮配额。
+
+### 组件结构图
+
+```mermaid
+flowchart TD
+    F[skills/name/SKILL.md 与参考文件] --> R[启动加载器与固定注册表]
+    R --> M[原模型节点: 目录与活跃指令]
+    R --> B[绑定的 load_skill 和 read_skill_file 工具]
+    M -->|单独请求 load_skill| T[原工具节点]
+    T --> E[execute_tool 任务]
+    E --> A[ToolMessage 与已接受名称 artifact]
+    A --> U[ToolsNode 返回 active_skills 增量更新]
+    U --> D[Reducer: 去重并保留最近名称]
+    D --> S[AgentState 与 SQLite 检查点]
+    S --> M
+    M -->|后续 read_skill_file| B
+    B --> X[预加载参考文本作为工具结果]
+    S -. RemoveMessage 后名称仍在 .-> M
+```
+
+四个注册节点与 execute_tool 任务名称保持不变。
+
+### 调整组件与阅读顺序
+
+| 模块 | 职责 |
+|---|---|
+| `agent/skills.py`、`skills/` | 加载／校验受信任的元数据、指令和目录内参考文本 |
+| `agent/tools/skills.py` | 返回已接受加载标记，查询活跃技能参考资料 |
+| `agent/tools/__init__.py` | create_tools(skills) 在基础 TOOLS 后追加绑定后的技能工具 |
+| `agent/state.py` | active_skills 与去重、保留近期名称的 reducer |
+| `agent/nodes/tools.py` | 拒绝混合加载批次，完成后才返回已接受名称 |
+| `agent/nodes/model.py`、`agent/prompts.py` | 每次主模型调用提供目录，活跃指令进入 system context |
+| `config/agent.py`、`main.py` | max_active_skills=2 与启动注册表组装 |
+
+建议顺序：加载器 → 工具 → State/reducer → 工具节点 → 模型节点／提示词组装 → 启动。
+按这个顺序跟踪文件如何变成已接受名称、持久化 State，再进入下一次模型请求。
+
+### State 更新与 runtime
+
+load_skill 使用 content-and-artifact 返回 `(text, {"skill_name": name})`，
+ToolNode 产生匹配的 ToolMessage，现有任务保存结果。整批完成后，ToolsNode 返回
+`{"active_skills": [name]}`；reducer 合并、去重，把重新加载的名称移到末尾，并保留
+最近 max_active_skills 个名称。这个字段不写入指令正文。
+
+加载必须单独成批，否则 ToolsNode 在任何写入／审批前拒绝整批。
+同批工具读取批次开始前的 runtime State，所以参考查询不能依赖同批刚激活的名称。
+其他普通批次保留顺序执行。技能请求使用原来的配额、历史和错误策略，激活不修改待办。
+
+read_skill_file(name, path, runtime) 通过图注入的 runtime State 读取活跃名称；
+模型只提供 name/path。查询只使用预加载映射，不读取任意磁盘路径。
+参考文本是普通工具结果，以后可能被摘要；活跃指令则每次从固定注册表重新注入。
+重启前删除某个技能后，会按当前注册表过滤名称，不再注入该技能的文本。
+
+### 练习
+
+1. 给出明确日期与分钟预算，要求生成学习草案；观察目录发现、load_skill、
+   read_skill_file，最后进入已有草案分支。
+2. 在检查点中查看 active_skills，确认是名称而非 Skill 对象或指令正文，
+   重启后观察指令进入下一次模型请求。
+3. max_active_skills=2 时加载三个技能，再重新加载其中一个，跟踪 reducer 顺序。
+4. 触发摘要，确认原加载消息被删除后，技能仍会注入。
+5. 要求整理待办时先给只读建议，后续明确删除仍经过人工审批。
+   技能选择／遵循属于模型引导。
+
+### 验证方式
+
+```bash
+.venv/bin/python -m pytest -q src/agent_apps/todo_list_assistant_agent/tests/test_skills.py -W error
+.venv/bin/python -m pytest -q src/agent_apps/todo_list_assistant_agent/tests -W error
+.venv/bin/ruff check src/agent_apps/todo_list_assistant_agent
+.venv/bin/ruff format --check src/agent_apps/todo_list_assistant_agent
+uv tool run --from pyright pyright --pythonpath .venv/bin/python src/agent_apps/todo_list_assistant_agent
+```
+
+测试覆盖错误／越界文件、随应用提供的技能、渐进式披露、隐藏 runtime 参数、活跃参考
+查询、未知路径、有界激活、混合加载拒绝、配额、删除审批，以及重启／摘要后保留名称。
+使用假模型和临时 SQLite，不声称验证了真实模型的技能选择。当前应用 **297 项通过**，
+其中 MCP 专项 28 项、技能专项 25 项，原有 244 项回归继续通过。与 create_agent 应用
+联合 **453 项通过**，Ruff lint／格式与 Pyright 均通过。测试不读取个人 MCP 配置、密钥或数据库。
+
+## 学习路线状态
+
+用户于 2026-11-24 指定 MCP 为 V10、Skills 为 V11，两版均已实现。
+原来把流式交互安排为 V11 的提案已被替代。流式功能仍未实现，当前没有确认编号；
+后续主题与编号由用户决定，不提前标记为已有能力。
 
 ## 后续版本怎样继续记录
 

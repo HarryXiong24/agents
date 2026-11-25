@@ -15,7 +15,12 @@ def approve_tool_call(
 ) -> ToolMessage | Command:
     """Pause protected calls and continue only after an explicit boolean approval."""
     call = request.tool_call
-    if call["name"] not in agent_settings.AGENT_CONFIG.approval_tools:
+    metadata = (request.tool.metadata or {}) if request.tool is not None else {}
+    # External tools use each server's approval policy; local policy still applies.
+    protected = call["name"] in agent_settings.AGENT_CONFIG.approval_tools or (
+        bool(metadata.get("mcp_server")) and metadata.get("require_approval", True)
+    )
+    if not protected:
         return execute(request)
 
     # JSON data is saved with the interrupt. Only console.py reads terminal input.

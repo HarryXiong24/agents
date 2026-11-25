@@ -1,6 +1,9 @@
 """Build a ReAct graph with summaries, tool records, and an optional draft branch."""
 
+from collections.abc import Mapping, Sequence
+
 from langchain_core.language_models import BaseChatModel
+from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -11,23 +14,28 @@ from .nodes.draft import DraftNode
 from .nodes.model import ModelNode, route_after_model
 from .nodes.summarize import SummarizeNode
 from .nodes.tools import ToolsNode, route_after_tools
+from .skills import Skill
 from .state import AgentState
-from .tools import TOOLS
+from .tools import create_tools
 
 
 def build_graph(
     model: BaseChatModel,
     checkpointer: BaseCheckpointSaver | None = None,
+    *,
+    skills: Mapping[str, Skill] | None = None,
+    mcp_tools: Sequence[BaseTool] = (),
 ):
     """Bind fixed dependencies once and compile a checkpoint-aware ReAct loop."""
     agent_config = agent_settings.AGENT_CONFIG
     # Node objects hold fixed resources; conversation data remains in AgentState.
-    model_node = ModelNode(model.bind_tools(TOOLS), agent_config)
+    tools = [*create_tools(skills), *mcp_tools]
+    model_node = ModelNode(model.bind_tools(tools), agent_config, skills)
     summary_node = SummarizeNode(model, agent_config)
     draft_node = DraftNode(model)
     tools_node = ToolsNode(
         ToolNode(
-            TOOLS,
+            tools,
             handle_tool_errors=handle_tool_error,
             wrap_tool_call=tool_call_middleware,
         ),
