@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "pomodoro": {
+      "transport": "stdio",
+      "command": "python",
+      "args": ["-m", "agent_apps.todo_list_assistant_codex_sdk.mcp_servers.pomodoro"],
+      "tools": ["plan_pomodoros"],
+      "require_approval": false
+    }
+  }
+}

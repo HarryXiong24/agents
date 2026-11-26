@@ -44,6 +44,12 @@ agent-by-langgraph = "agent_apps.agent_by_langgraph.__main__:main"
 bookkeeping-agent = "agent_apps.bookkeeping_agent.__main__:main"
 todo-list-assistant-agent = "agent_apps.todo_list_assistant_agent.main:main"
 todo-list-assistant-create-agent = "agent_apps.todo_list_assistant_create_agent.main:main"
+todo-list-assistant-codex-sdk = "agent_apps.todo_list_assistant_codex_sdk.main:main"
+
+[project.optional-dependencies]
+codex-todo = [
+    "openai-codex>=0.172.0",
+]
 
 [dependency-groups]
 dev = [
